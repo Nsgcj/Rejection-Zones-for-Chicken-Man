@@ -1,0 +1,574 @@
+//@version=6
+indicator("CM Rejection Zones", shorttitle = "CM RZ", overlay = true,
+     max_boxes_count  = 200,
+     max_lines_count  = 400,
+     max_labels_count = 300)
+
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//
+// ============================================================================
+// CM REJECTION ZONES  —  standalone module (to be merged into CM Combo)
+// ----------------------------------------------------------------------------
+// 1. HTF REJECTION ZONES on up to four timeframes (default M / W / 15D / D).
+//    A zone is the rejecting wick only: wick tip to body edge.
+//      LIQ — the wick swept an HTF swing high/low and the body closed back
+//            inside it (wick-only sweep, no body acceptance).
+//      S&R — the wick rejected a level that already held: an opposite swing
+//            (role flip) or another swing on the same side.
+//      S&D — price displaced away from the zone by >= N x HTF ATR within the
+//            next few HTF bars. A wick-dominant candle with no other tag is
+//            shown dashed as "S&D?" and dropped if the displacement never
+//            comes.
+//    A zone dies when its own TF, or the next TF down, CLOSES through the
+//    wick tip. A wick through the tip only dashes the border.
+//
+// 2. STRUCTURE on every timeframe (default M / W / 15D / D / 4H / 1H / 5m).
+//    Breaks count on a close. On the four zone TFs a wick through a swing is
+//    "pending" and is confirmed early as soon as the next TF down closes
+//    beyond it: M->W, W->D, 15D->D, D->4H. CHoCH = dashed, BOS = solid.
+//
+// 3. SETUP: a 4H / 1H / 5m break in the zone's direction while price has
+//    tapped an active HTF zone within the last N chart bars.
+//
+// Non-repainting: every HTF value is read from its last CLOSED bar.
+// Timeframes below the chart's are skipped and show "—" in the dashboard.
+// ============================================================================
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+const string G_TF  = "Timeframes"
+const string G_DET = "Zone detection"
+const string G_VIS = "Zone display"
+const string G_STR = "Structure"
+const string G_SIG = "Setup signal"
+const string G_DSH = "Dashboard"
+
+i_tf0 = input.timeframe("1M",  "Zone TF 1",      group = G_TF, inline = "t0")
+i_on0 = input.bool(true, "",                     group = G_TF, inline = "t0")
+i_tf1 = input.timeframe("1W",  "Zone TF 2",      group = G_TF, inline = "t1")
+i_on1 = input.bool(true, "",                     group = G_TF, inline = "t1")
+i_tf2 = input.timeframe("15D", "Zone TF 3",      group = G_TF, inline = "t2")
+i_on2 = input.bool(true, "",                     group = G_TF, inline = "t2")
+i_tf3 = input.timeframe("1D",  "Zone TF 4",      group = G_TF, inline = "t3")
+i_on3 = input.bool(true, "",                     group = G_TF, inline = "t3")
+i_tf4 = input.timeframe("240", "Structure TF 1", group = G_TF, inline = "t4")
+i_on4 = input.bool(true, "",                     group = G_TF, inline = "t4")
+i_tf5 = input.timeframe("60",  "Structure TF 2", group = G_TF, inline = "t5")
+i_on5 = input.bool(true, "",                     group = G_TF, inline = "t5")
+i_tf6 = input.timeframe("5",   "Structure TF 3", group = G_TF, inline = "t6", tooltip = "Early confirmation of a zone-TF wick break uses the next TF down in this order: TF1 -> TF2, TF2 -> TF4, TF3 -> TF4, TF4 -> Structure TF 1.")
+i_on6 = input.bool(true, "",                     group = G_TF, inline = "t6")
+
+i_htfLen = input.int(2,     "Zone TF swing length",               group = G_DET, minval = 1, maxval = 10, tooltip = "Bars each side that confirm a swing high/low on the zone timeframes. Used for LIQ sweeps, S&R levels and zone-TF structure. Kept small because monthly and weekly charts have few bars.")
+i_wick   = input.float(1.5, "Wick-to-body ratio",                 group = G_DET, minval = 0.5, step = 0.1, tooltip = "A candle whose rejecting wick is at least this many times its body (and longer than its other wick) is a rejection candle.")
+i_srTol  = input.float(0.25, "S&R level tolerance (× HTF ATR)",   group = G_DET, minval = 0.0, step = 0.05, tooltip = "How close an earlier swing must sit to the wick to count as the same level.")
+i_sdMult = input.float(1.0, "S&D displacement (× HTF ATR)",       group = G_DET, minval = 0.1, step = 0.1, tooltip = "How far price must move away from the zone for the S&D tag.")
+i_sdBars = input.int(3,     "S&D window (HTF bars)",              group = G_DET, minval = 1, maxval = 20, tooltip = "The displacement must happen within this many zone-TF bars. An untagged 'S&D?' zone is removed when the window runs out.")
+
+i_maxZones = input.int(2,    "Zones per TF per side",            group = G_VIS, minval = 1, maxval = 6, tooltip = "Keeps the closest N demand and N supply zones for each timeframe. Unconfirmed 'S&D?' zones are dropped first.")
+i_extBars  = input.int(20,   "Extend right (chart bars)",        group = G_VIS, minval = 0, maxval = 300)
+i_quads    = input.bool(true, "Quadrant lines (25 / 50 / 75)",   group = G_VIS)
+i_zoneTxt  = input.bool(true, "Zone labels",                     group = G_VIS)
+i_cDem     = input.color(color.new(color.teal, 0), "Demand",     group = G_VIS, inline = "zc")
+i_cSup     = input.color(color.new(color.red,  0), "Supply",     group = G_VIS, inline = "zc")
+i_fillT    = input.int(85,   "Fill transparency",                group = G_VIS, minval = 0, maxval = 100)
+
+i_ltfLen     = input.int(3,     "Structure TF swing length",     group = G_STR, minval = 1, maxval = 20, tooltip = "Bars each side that confirm a swing high/low on the 4H / 1H / 5m structure timeframes.")
+i_showHtfStr = input.bool(true, "Draw zone-TF breaks",           group = G_STR)
+i_showLtfStr = input.bool(true, "Draw structure-TF breaks",      group = G_STR)
+i_strKeep    = input.int(30,    "Break lines to keep",           group = G_STR, minval = 4, maxval = 150)
+i_cBull      = input.color(color.aqua,   "Bull break",           group = G_STR, inline = "sc")
+i_cBear      = input.color(color.orange, "Bear break",           group = G_STR, inline = "sc")
+
+i_showSetup = input.bool(true, "Show setup labels",              group = G_SIG)
+i_setupBos  = input.bool(true, "Count BOS as well as CHoCH",     group = G_SIG, tooltip = "OFF: only a CHoCH (break against the prior bias) inside a zone counts as a setup.")
+i_setupWin  = input.int(30,    "Zone tap window (chart bars)",   group = G_SIG, minval = 1, maxval = 500, tooltip = "The break must come within this many chart bars of price last trading into the zone.")
+
+i_dash     = input.bool(true, "Show dashboard", group = G_DSH)
+i_dashPos  = input.string("Bottom Right", "Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right", "Middle Left"], group = G_DSH)
+i_dashSize = input.string("Small", "Text size", options = ["Tiny", "Small", "Normal"], group = G_DSH)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+chartSec = timeframe.in_seconds(timeframe.period)
+chartMs  = chartSec * 1000
+
+f_avail(simple string tf) =>
+    timeframe.in_seconds(tf) >= chartSec
+
+// A timeframe below the chart's is not requested at all; the chart's own
+// timeframe is requested in its place and the result is ignored.
+f_req(simple string tf) =>
+    timeframe.in_seconds(tf) >= chartSec ? tf : timeframe.period
+
+f_tfName(simple string tf) =>
+    int s = timeframe.in_seconds(tf)
+    s >= 86400 ? (tf == "1D" or tf == "D" ? "D" : tf == "1W" or tf == "W" ? "W" : tf == "1M" or tf == "M" ? "M" : tf) :
+     s % 3600 == 0 ? str.tostring(s / 3600) + "H" : str.tostring(s / 60) + "m"
+
+// Next timeframe down for early confirmation: M->W, W->D, 15D->D, D->4H.
+f_next(int i) =>
+    i == 0 ? 1 : i <= 2 ? 3 : 4
+
+f_countIn(array<float> a, float lo, float hi) =>
+    int n = 0
+    if array.size(a) > 0
+        for v in a
+            if v >= lo and v <= hi
+                n += 1
+    n
+
+// ============================================================================
+// HTF ENGINE — evaluated inside request.security on each timeframe
+// ----------------------------------------------------------------------------
+// Everything is returned with [1] and read with lookahead_on, which yields the
+// last CLOSED bar of that timeframe: no repainting, no future leak.
+// Zone tags come back as an int: 1 = LIQ, 4 = S&R, 5 = both.
+// ============================================================================
+f_tf(simple int pivLen, simple float wickRatio, simple float srTol) =>
+    float atrV = ta.atr(14)
+    float ph   = ta.pivothigh(high, pivLen, pivLen)
+    float pl   = ta.pivotlow(low,   pivLen, pivLen)
+    int   pivT = time[pivLen]
+
+    // ── Structure: close beyond the last confirmed swing ─────────────────
+    var float swH     = na
+    var int   swHT    = na
+    var float swL     = na
+    var int   swLT    = na
+    var int   bias    = 0
+    var int   evT     = na
+    var int   evDir   = 0
+    var bool  evChoch = false
+    var float evLvl   = na
+    var int   evPivT  = na
+
+    if not na(swH) and close > swH
+        evChoch := bias == -1
+        evDir   := 1
+        evT     := time
+        evLvl   := swH
+        evPivT  := swHT
+        bias    := 1
+        swH     := na
+    if not na(swL) and close < swL
+        evChoch := bias == 1
+        evDir   := -1
+        evT     := time
+        evLvl   := swL
+        evPivT  := swLT
+        bias    := -1
+        swL     := na
+
+    // ── Rejection zones ──────────────────────────────────────────────────
+    float bodyHi = math.max(open, close)
+    float bodyLo = math.min(open, close)
+    float body   = math.max(bodyHi - bodyLo, syminfo.mintick)
+    float upW    = high - bodyHi
+    float dnW    = bodyLo - low
+
+    // Liquidity references are consumed by any trade through them, so a
+    // level can only produce one sweep.
+    var float liqH = na
+    var float liqL = na
+    var array<float> pHs = array.new_float()
+    var array<float> pLs = array.new_float()
+
+    bool bearLiq = not na(liqH) and high > liqH and bodyHi < liqH
+    bool bullLiq = not na(liqL) and low < liqL and bodyLo > liqL
+    if not na(liqH) and high > liqH
+        liqH := na
+    if not na(liqL) and low < liqL
+        liqL := na
+
+    bool bearWick = upW > 0 and upW >= wickRatio * body and upW >= dnW
+    bool bullWick = dnW > 0 and dnW >= wickRatio * body and dnW >= upW
+
+    var int   zBullT    = na
+    var float zBullTop  = na
+    var float zBullBot  = na
+    var int   zBullTags = 0
+    var int   zBearT    = na
+    var float zBearTop  = na
+    var float zBearBot  = na
+    var int   zBearTags = 0
+
+    float tol = srTol * nz(atrV, high - low)
+    if bearLiq or bearWick
+        int nH = f_countIn(pHs, bodyHi - tol, high + tol)
+        int nL = f_countIn(pLs, bodyHi - tol, high + tol)
+        bool sr = nL >= 1 or nH >= (bearLiq ? 2 : 1)
+        zBearT    := time
+        zBearTop  := high
+        zBearBot  := bodyHi
+        zBearTags := (bearLiq ? 1 : 0) + (sr ? 4 : 0)
+    if bullLiq or bullWick
+        int nH = f_countIn(pHs, low - tol, bodyLo + tol)
+        int nL = f_countIn(pLs, low - tol, bodyLo + tol)
+        bool sr = nH >= 1 or nL >= (bullLiq ? 2 : 1)
+        zBullT    := time
+        zBullTop  := bodyLo
+        zBullBot  := low
+        zBullTags := (bullLiq ? 1 : 0) + (sr ? 4 : 0)
+
+    // ── Adopt this bar's newly confirmed swings (after the tests above) ──
+    if not na(ph)
+        swH  := ph
+        swHT := pivT
+        liqH := ph
+        array.push(pHs, ph)
+        if array.size(pHs) > 10
+            array.shift(pHs)
+    if not na(pl)
+        swL  := pl
+        swLT := pivT
+        liqL := pl
+        array.push(pLs, pl)
+        if array.size(pLs) > 10
+            array.shift(pLs)
+
+    [close[1], atrV[1], swH[1], swL[1], swHT[1], swLT[1], evT[1], evDir[1], evChoch[1], evLvl[1], evPivT[1], zBullT[1], zBullTop[1], zBullBot[1], zBullTags[1], zBearT[1], zBearTop[1], zBearBot[1], zBearTags[1]]
+
+[c0, a0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, rT0, rTop0, rBot0, rTag0] = request.security(syminfo.tickerid, f_req(i_tf0), f_tf(i_htfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
+[c1, a1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, rT1, rTop1, rBot1, rTag1] = request.security(syminfo.tickerid, f_req(i_tf1), f_tf(i_htfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
+[c2, a2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, rT2, rTop2, rBot2, rTag2] = request.security(syminfo.tickerid, f_req(i_tf2), f_tf(i_htfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
+[c3, a3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, rT3, rTop3, rBot3, rTag3] = request.security(syminfo.tickerid, f_req(i_tf3), f_tf(i_htfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
+[c4, a4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, rT4, rTop4, rBot4, rTag4] = request.security(syminfo.tickerid, f_req(i_tf4), f_tf(i_ltfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
+[c5, a5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, rT5, rTop5, rBot5, rTag5] = request.security(syminfo.tickerid, f_req(i_tf5), f_tf(i_ltfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
+[c6, a6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, rT6, rTop6, rBot6, rTag6] = request.security(syminfo.tickerid, f_req(i_tf6), f_tf(i_ltfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
+
+// ============================================================================
+// PER-TIMEFRAME LOOKUPS  (index 0-3 = zone TFs, 4-6 = structure TFs)
+// ============================================================================
+closes = array.from(c0, c1, c2, c3, c4, c5, c6)
+atrs   = array.from(a0, a1, a2, a3, a4, a5, a6)
+avail  = array.from(f_avail(i_tf0), f_avail(i_tf1), f_avail(i_tf2), f_avail(i_tf3), f_avail(i_tf4), f_avail(i_tf5), f_avail(i_tf6))
+isOn   = array.from(i_on0 and f_avail(i_tf0), i_on1 and f_avail(i_tf1), i_on2 and f_avail(i_tf2), i_on3 and f_avail(i_tf3), i_on4 and f_avail(i_tf4), i_on5 and f_avail(i_tf5), i_on6 and f_avail(i_tf6))
+
+var array<string> names   = array.from(f_tfName(i_tf0), f_tfName(i_tf1), f_tfName(i_tf2), f_tfName(i_tf3), f_tfName(i_tf4), f_tfName(i_tf5), f_tfName(i_tf6))
+var array<int>    tfMsArr = array.from(timeframe.in_seconds(i_tf0) * 1000, timeframe.in_seconds(i_tf1) * 1000, timeframe.in_seconds(i_tf2) * 1000, timeframe.in_seconds(i_tf3) * 1000, timeframe.in_seconds(i_tf4) * 1000, timeframe.in_seconds(i_tf5) * 1000, timeframe.in_seconds(i_tf6) * 1000)
+
+// Last closed close of the next TF down. When that TF is below the chart's,
+// the chart's own confirmed close stands in for it.
+f_nextClose(int i) =>
+    int n = f_next(i)
+    array.get(avail, n) ? array.get(closes, n) : (barstate.isconfirmed ? close : float(na))
+
+// ============================================================================
+// STATE
+// ============================================================================
+type Zone
+    int   tfi
+    int   dir        // 1 = demand (bullish), -1 = supply (bearish)
+    float top
+    float bot
+    bool  liq
+    bool  sd
+    bool  sr
+    int   t0         // open time of the rejection candle
+    int   born       // chart time the zone was created
+    float ext        // furthest price reached away from the zone (S&D test)
+    bool  inside
+    bool  tapped
+    int   tapBar
+    bool  wickThru
+    box   bx
+    line  q1
+    line  q2
+    line  q3
+
+var array<Zone>   zones     = array.new<Zone>()
+var array<int>    effBias   = array.new_int(7, 0)
+var array<float>  brokenH   = array.new_float(7, na)
+var array<float>  brokenL   = array.new_float(7, na)
+var array<string> lastTxt   = array.new_string(7, "—")
+var array<line>   strLines  = array.new_line()
+var array<label>  strLbls   = array.new_label()
+var array<label>  setupLbls = array.new_label()
+
+// Reset every bar.
+pendArr = array.new_int(7, 0)        // +1 / -1 = wick through a zone-TF swing, awaiting a close
+fl      = array.new_bool(5, false)   // 0 new zone, 1 zone entered, 2 bull setup, 3 bear setup, 4 early HTF break
+
+// ============================================================================
+// ZONES
+// ============================================================================
+f_tags(Zone z) =>
+    string s = ""
+    if z.liq
+        s := "LIQ"
+    if z.sr
+        s := s + (s == "" ? "" : "+") + "S&R"
+    if z.sd
+        s := s + (s == "" ? "" : "+") + "S&D"
+    s == "" ? "S&D?" : s
+
+f_zoneText(Zone z) =>
+    array.get(names, z.tfi) + (z.dir == 1 ? " demand · " : " supply · ") + f_tags(z)
+
+f_pending(Zone z) =>
+    not z.liq and not z.sr and not z.sd
+
+f_delZone(Zone z) =>
+    box.delete(z.bx)
+    line.delete(z.q1)
+    line.delete(z.q2)
+    line.delete(z.q3)
+
+// Keep the closest N zones per timeframe and side; unconfirmed "S&D?" zones
+// are dropped before confirmed ones.
+f_prune(int i, int dir) =>
+    int cnt = 0
+    for z in zones
+        if z.tfi == i and z.dir == dir
+            cnt += 1
+    while cnt > i_maxZones
+        int   victim  = -1
+        float worst   = -1.0
+        bool  vicPend = false
+        for j = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, j)
+            if z.tfi == i and z.dir == dir
+                bool  pend = f_pending(z)
+                float d    = math.abs((z.top + z.bot) / 2 - close)
+                if victim < 0 or (pend and not vicPend) or (pend == vicPend and d > worst)
+                    victim  := j
+                    worst   := d
+                    vicPend := pend
+        if victim >= 0
+            f_delZone(array.get(zones, victim))
+            array.remove(zones, victim)
+        cnt -= 1
+
+f_addZone(int i, int dir, float top, float bot, int tags, int t0) =>
+    if not na(top) and not na(bot) and top > bot and not na(t0)
+        bool  liq = tags == 1 or tags == 5
+        bool  sr  = tags >= 4
+        color c   = dir == 1 ? i_cDem : i_cSup
+        int   rt  = time + i_extBars * chartMs
+        int   bw  = i == 0 ? 3 : i == 3 ? 1 : 2
+        Zone z = Zone.new(tfi = i, dir = dir, top = top, bot = bot, liq = liq, sd = false, sr = sr, t0 = t0, born = time, ext = dir == 1 ? top : bot, inside = false, tapped = false, tapBar = na, wickThru = false)
+        bool pend = f_pending(z)
+        z.bx := box.new(t0, top, rt, bot, xloc = xloc.bar_time,
+             bgcolor = color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT),
+             border_color = c, border_width = bw,
+             border_style = pend ? line.style_dashed : line.style_solid,
+             text = i_zoneTxt ? f_zoneText(z) : "", text_size = size.small, text_color = c,
+             text_halign = text.align_right, text_valign = dir == 1 ? text.align_bottom : text.align_top)
+        if i_quads
+            float h = top - bot
+            z.q1 := line.new(t0, bot + h * 0.25, rt, bot + h * 0.25, xloc = xloc.bar_time, color = color.new(c, 60), style = line.style_dotted)
+            z.q2 := line.new(t0, bot + h * 0.50, rt, bot + h * 0.50, xloc = xloc.bar_time, color = color.new(c, 20), style = line.style_dashed)
+            z.q3 := line.new(t0, bot + h * 0.75, rt, bot + h * 0.75, xloc = xloc.bar_time, color = color.new(c, 60), style = line.style_dotted)
+        array.push(zones, z)
+        f_prune(i, dir)
+        if liq or sr
+            array.set(fl, 0, true)
+
+// Update every live zone: invalidation, S&D upgrade, taps and redraw.
+if array.size(zones) > 0
+    for j = array.size(zones) - 1 to 0
+        Zone  z   = array.get(zones, j)
+        float own = array.get(closes, z.tfi)
+        float nc  = f_nextClose(z.tfi)
+        bool  dead = z.dir == 1 ? ((not na(own) and own < z.bot) or (not na(nc) and nc < z.bot)) : ((not na(own) and own > z.top) or (not na(nc) and nc > z.top))
+        if not dead and not z.sd
+            z.ext := z.dir == 1 ? math.max(z.ext, high) : math.min(z.ext, low)
+            float a  = array.get(atrs, z.tfi)
+            float mv = z.dir == 1 ? z.ext - z.top : z.bot - z.ext
+            if not na(a) and a > 0 and mv >= i_sdMult * a
+                z.sd := true
+        bool expired = f_pending(z) and time - z.born > i_sdBars * array.get(tfMsArr, z.tfi)
+        if dead or expired or not array.get(isOn, z.tfi)
+            f_delZone(z)
+            array.remove(zones, j)
+        else
+            bool touch = z.dir == 1 ? low <= z.top : high >= z.bot
+            if touch
+                if not z.inside and not f_pending(z)
+                    array.set(fl, 1, true)
+                z.tapped := true
+                z.tapBar := bar_index
+            z.inside   := touch
+            z.wickThru := z.dir == 1 ? low < z.bot : high > z.top
+            bool  pend = f_pending(z)
+            color c    = z.dir == 1 ? i_cDem : i_cSup
+            int   rt   = time + i_extBars * chartMs
+            box.set_right(z.bx, rt)
+            box.set_border_style(z.bx, z.wickThru or pend ? line.style_dashed : line.style_solid)
+            box.set_bgcolor(z.bx, color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT))
+            if i_zoneTxt
+                box.set_text(z.bx, f_zoneText(z))
+            if not na(z.q1)
+                line.set_x2(z.q1, rt)
+                line.set_x2(z.q2, rt)
+                line.set_x2(z.q3, rt)
+
+// ============================================================================
+// STRUCTURE EVENTS AND SETUPS
+// ============================================================================
+f_event(int i, int dir, bool choch, float lvl, int pivT, int evTime, bool early) =>
+    array.set(effBias, i, dir)
+    string kind  = choch ? "CHoCH" : "BOS"
+    string arrow = dir == 1 ? "↑" : "↓"
+    array.set(lastTxt, i, kind + " " + arrow + (early ? " (early)" : ""))
+    if early
+        array.set(fl, 4, true)
+
+    bool draw = i <= 3 ? i_showHtfStr : i_showLtfStr
+    if draw and not na(lvl) and not na(evTime)
+        color c  = dir == 1 ? i_cBull : i_cBear
+        int   x1 = na(pivT) ? evTime : pivT
+        line  ln = line.new(x1, lvl, evTime, lvl, xloc = xloc.bar_time, color = c, style = choch ? line.style_dashed : line.style_solid, width = i <= 3 ? 2 : 1)
+        label lb = label.new(evTime, lvl, array.get(names, i) + " " + kind + (early ? " (early)" : ""), xloc = xloc.bar_time, style = dir == 1 ? label.style_label_lower_left : label.style_label_upper_left, color = color.new(c, 100), textcolor = c, size = size.small)
+        array.push(strLines, ln)
+        array.push(strLbls, lb)
+        while array.size(strLines) > i_strKeep
+            line.delete(array.shift(strLines))
+            label.delete(array.shift(strLbls))
+
+    // Setup: a structure-TF break in the zone's direction, shortly after price
+    // traded into a confirmed zone. The highest-timeframe zone wins.
+    if i >= 4 and (choch or i_setupBos)
+        Zone best = na
+        for z in zones
+            if z.dir == dir and not f_pending(z) and z.tapped and bar_index - z.tapBar <= i_setupWin
+                if na(best)
+                    best := z
+                else if z.tfi < best.tfi
+                    best := z
+        if not na(best)
+            array.set(fl, dir == 1 ? 2 : 3, true)
+            if i_showSetup
+                string txt = array.get(names, i) + " " + kind + " " + arrow + "\nin " + array.get(names, best.tfi) + (dir == 1 ? " demand (" : " supply (") + f_tags(best) + ")"
+                label s = label.new(bar_index, dir == 1 ? low : high, txt, style = dir == 1 ? label.style_label_up : label.style_label_down, color = dir == 1 ? i_cDem : i_cSup, textcolor = color.white, size = size.small)
+                array.push(setupLbls, s)
+                while array.size(setupLbls) > 50
+                    label.delete(array.shift(setupLbls))
+
+// One timeframe's chart-side step. Called unconditionally on every bar so the
+// [1] change tests inside see continuous history.
+f_proc(int i, float sh, float sl, int sht, int slt, int eT, int eD, bool eC, float eL, int eP, int bT, float bTop, float bBot, int bTag, int rT, float rTop, float rBot, int rTag) =>
+    bool newEv   = not na(eT) and (na(eT[1]) or eT != eT[1])
+    bool newBull = not na(bT) and (na(bT[1]) or bT != bT[1])
+    bool newBear = not na(rT) and (na(rT[1]) or rT != rT[1])
+    if array.get(isOn, i)
+        if i <= 3
+            if newBull
+                f_addZone(i, 1, bTop, bBot, bTag, bT)
+            if newBear
+                f_addZone(i, -1, rTop, rBot, rTag, rT)
+
+        // Break on the timeframe's own close. Skipped if the same level was
+        // already confirmed early by the next TF down.
+        if newEv
+            float bh  = array.get(brokenH, i)
+            float bl  = array.get(brokenL, i)
+            bool  dup = eD == 1 ? (not na(bh) and eL == bh) : (not na(bl) and eL == bl)
+            if not dup
+                int  eb    = array.get(effBias, i)
+                bool choch = eb != 0 ? eb == -eD : eC
+                f_event(i, eD, choch, eL, eP, eT, false)
+
+        // Zone TFs only: a wick through the swing is pending until the next
+        // TF down closes beyond it, which confirms the break early.
+        if i <= 3
+            float nc = f_nextClose(i)
+            float bh = array.get(brokenH, i)
+            if not na(sh) and (na(bh) or sh != bh)
+                if not na(nc) and nc > sh
+                    array.set(brokenH, i, sh)
+                    f_event(i, 1, array.get(effBias, i) == -1, sh, sht, time, true)
+                else if high > sh
+                    array.set(pendArr, i, 1)
+            float bl = array.get(brokenL, i)
+            if not na(sl) and (na(bl) or sl != bl)
+                if not na(nc) and nc < sl
+                    array.set(brokenL, i, sl)
+                    f_event(i, -1, array.get(effBias, i) == 1, sl, slt, time, true)
+                else if low < sl
+                    array.set(pendArr, i, -1)
+
+// Zone TFs first, highest to lowest, so structure-TF setups see this bar's zones.
+f_proc(0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, rT0, rTop0, rBot0, rTag0)
+f_proc(1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, rT1, rTop1, rBot1, rTag1)
+f_proc(2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, rT2, rTop2, rBot2, rTag2)
+f_proc(3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, rT3, rTop3, rBot3, rTag3)
+f_proc(4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, rT4, rTop4, rBot4, rTag4)
+f_proc(5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, rT5, rTop5, rBot5, rTag5)
+f_proc(6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, rT6, rTop6, rBot6, rTag6)
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+f_dashPos(string s) =>
+    switch s
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Bottom Left"  => position.bottom_left
+        "Middle Right" => position.middle_right
+        "Middle Left"  => position.middle_left
+        => position.bottom_right
+
+// Where price sits against one zone TF: inside a zone, or the distance (in
+// that TF's ATR) to the nearest supply above and demand below.
+f_zoneStatus(int i) =>
+    string inTxt = ""
+    color  inCol = na
+    float  dUp   = na
+    float  dDn   = na
+    float  a     = array.get(atrs, i)
+    for z in zones
+        if z.tfi == i and not f_pending(z)
+            if close <= z.top and close >= z.bot
+                inTxt := "IN " + (z.dir == 1 ? "DEMAND " : "SUPPLY ") + f_tags(z)
+                inCol := z.dir == 1 ? i_cDem : i_cSup
+            else if z.dir == -1 and z.bot > close and not na(a) and a > 0
+                float d = (z.bot - close) / a
+                dUp := na(dUp) ? d : math.min(dUp, d)
+            else if z.dir == 1 and z.top < close and not na(a) and a > 0
+                float d = (close - z.top) / a
+                dDn := na(dDn) ? d : math.min(dDn, d)
+    string txt = inTxt != "" ? inTxt : "S " + (na(dUp) ? "—" : str.tostring(dUp, "#.#")) + " / D " + (na(dDn) ? "—" : str.tostring(dDn, "#.#")) + " ATR"
+    [txt, inTxt != "" ? inCol : color.silver]
+
+var table dash = table.new(f_dashPos(i_dashPos), 4, 8, bgcolor = color.new(color.black, 70), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+
+if barstate.islast
+    table.clear(dash, 0, 0, 3, 7)
+    if i_dash
+        dsz = i_dashSize == "Tiny" ? size.tiny : i_dashSize == "Normal" ? size.normal : size.small
+        color hdr = color.new(color.gray, 55)
+        table.cell(dash, 0, 0, "TF",         text_color = color.white, bgcolor = hdr, text_size = dsz)
+        table.cell(dash, 1, 0, "Bias",       text_color = color.white, bgcolor = hdr, text_size = dsz)
+        table.cell(dash, 2, 0, "Last break", text_color = color.white, bgcolor = hdr, text_size = dsz)
+        table.cell(dash, 3, 0, "Zone",       text_color = color.white, bgcolor = hdr, text_size = dsz)
+        for i = 0 to 6
+            int r = i + 1
+            table.cell(dash, 0, r, array.get(names, i), text_color = color.white, text_size = dsz, text_halign = text.align_left)
+            if not array.get(isOn, i)
+                string why = array.get(avail, i) ? "off" : "below chart TF"
+                table.cell(dash, 1, r, "—", text_color = color.gray, text_size = dsz)
+                table.cell(dash, 2, r, why, text_color = color.gray, text_size = dsz)
+                table.cell(dash, 3, r, "—", text_color = color.gray, text_size = dsz)
+            else
+                int eb = array.get(effBias, i)
+                table.cell(dash, 1, r, eb == 1 ? "BULL" : eb == -1 ? "BEAR" : "—", text_color = eb == 1 ? i_cBull : eb == -1 ? i_cBear : color.gray, text_size = dsz)
+                int    pd   = array.get(pendArr, i)
+                string last = array.get(lastTxt, i) + (pd == 1 ? " · wick ↑ pending" : pd == -1 ? " · wick ↓ pending" : "")
+                table.cell(dash, 2, r, last, text_color = color.silver, text_size = dsz, text_halign = text.align_left)
+                if i <= 3
+                    [zt, zc] = f_zoneStatus(i)
+                    table.cell(dash, 3, r, zt, text_color = zc, text_size = dsz, text_halign = text.align_left)
+                else
+                    table.cell(dash, 3, r, "", text_size = dsz)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+alertcondition(array.get(fl, 0), "RZ New HTF zone",          "A new HTF rejection zone formed.")
+alertcondition(array.get(fl, 1), "RZ Price entered zone",    "Price traded into an active HTF rejection zone.")
+alertcondition(array.get(fl, 2), "RZ Bullish setup",         "4H/1H/5m bullish break after a tap of an HTF demand zone.")
+alertcondition(array.get(fl, 3), "RZ Bearish setup",         "4H/1H/5m bearish break after a tap of an HTF supply zone.")
+alertcondition(array.get(fl, 4), "RZ HTF wick break confirmed early", "A zone-TF wick break was confirmed by a close on the next timeframe down.")
