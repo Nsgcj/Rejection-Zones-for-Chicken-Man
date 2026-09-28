@@ -1917,6 +1917,8 @@ f_undraw(Zone z) =>
         label.delete(lb)
     array.clear(z.qLbls)
 
+// Returns the zone itself: the trailing `z` keeps Pine from treating the
+// if/else below (box in one branch, loop in the other) as the return value.
 f_drawZone(Zone z) =>
     color c  = z.dir == 1 ? i_cDem : i_cSup
     int   rt = z.mitig ? z.mitT : time + i_extBars * chartMs
@@ -1942,6 +1944,7 @@ f_drawZone(Zone z) =>
                     array.push(z.qLines, line.new(z.t0, y, rt, y, xloc = xloc.bar_time, color = color.new(c, k == 2 ? 10 : 45), style = f_lineStyle(array.get(qSty, k)), width = array.get(qWid, k)))
                     if array.get(qLbl, k)
                         array.push(z.qLbls, label.new(rt, y, str.tostring(array.get(qPct, k) * 100, "#") + "%  " + str.tostring(y, format.mintick), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(c, 100), textcolor = c, size = size.tiny))
+    z
 
 // Keep the best N active zones per timeframe and side: unconfirmed "S&D?"
 // zones go first, then the lowest score, then the farthest from price.
