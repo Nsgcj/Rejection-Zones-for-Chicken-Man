@@ -69,6 +69,7 @@ i_maxZones = input.int(2,    "Zones per TF per side",            group = G_VIS, 
 i_extBars  = input.int(20,   "Extend right (chart bars)",        group = G_VIS, minval = 0, maxval = 300)
 i_quads    = input.bool(true, "Quadrant lines (25 / 50 / 75)",   group = G_VIS)
 i_zoneTxt  = input.bool(true, "Zone labels",                     group = G_VIS)
+i_maxDist  = input.float(3.0, "Hide zones farther than (% from price)", group = G_VIS, minval = 0.0, step = 0.5, tooltip = "Zones farther than this from the current price are not drawn, so a distant monthly zone cannot squash the chart scale. They are still tracked, still count for setups and still show in the dashboard, and they reappear when price comes back within range. 0 = always draw.")
 i_cDem     = input.color(color.new(color.teal, 0), "Demand",     group = G_VIS, inline = "zc")
 i_cSup     = input.color(color.new(color.red,  0), "Supply",     group = G_VIS, inline = "zc")
 i_fillT    = input.int(85,   "Fill transparency",                group = G_VIS, minval = 0, maxval = 100)
@@ -81,7 +82,7 @@ i_cBull      = input.color(color.aqua,   "Bull break",           group = G_STR, 
 i_cBear      = input.color(color.orange, "Bear break",           group = G_STR, inline = "sc")
 
 i_showSetup = input.bool(true, "Show setup labels",              group = G_SIG)
-i_setupBos  = input.bool(true, "Count BOS as well as CHoCH",     group = G_SIG, tooltip = "OFF: only a CHoCH (break against the prior bias) inside a zone counts as a setup.")
+i_setupBos  = input.bool(true, "Count BOS as well as CHoCH",     group = G_SIG, tooltip = "OFF: only a CHoCH (break against the prior bias) inside a zone counts as a setup. Either way each zone gives at most one setup per structure TF per visit; it re-arms when price leaves the zone and trades back in.")
 i_setupWin  = input.int(30,    "Zone tap window (chart bars)",   group = G_SIG, minval = 1, maxval = 500, tooltip = "The break must come within this many chart bars of price last trading into the zone.")
 
 i_dash     = input.bool(true, "Show dashboard", group = G_DSH)
@@ -273,6 +274,9 @@ type Zone
     bool  tapped
     int   tapBar
     bool  wickThru
+    bool  s4         // setup already fired this visit, per structure TF
+    bool  s5
+    bool  s6
     box   bx
     line  q1
     line  q2
@@ -315,6 +319,36 @@ f_delZone(Zone z) =>
     line.delete(z.q1)
     line.delete(z.q2)
     line.delete(z.q3)
+    z.bx := na
+    z.q1 := na
+    z.q2 := na
+    z.q3 := na
+
+f_far(Zone z) =>
+    float d = close > z.top ? close - z.top : close < z.bot ? z.bot - close : 0.0
+    i_maxDist > 0 and d / close * 100 > i_maxDist
+
+// Label corner differs per timeframe so zones stacked on the same price
+// (e.g. a W and a 15D zone) do not print their labels on top of each other.
+f_zoneHalign(int i) =>
+    i == 1 ? text.align_left : i == 2 ? text.align_center : text.align_right
+
+f_drawZone(Zone z) =>
+    bool  pend = f_pending(z)
+    color c    = z.dir == 1 ? i_cDem : i_cSup
+    int   rt   = time + i_extBars * chartMs
+    int   bw   = z.tfi == 0 ? 3 : z.tfi == 3 ? 1 : 2
+    z.bx := box.new(z.t0, z.top, rt, z.bot, xloc = xloc.bar_time,
+         bgcolor = color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT),
+         border_color = c, border_width = bw,
+         border_style = pend ? line.style_dashed : line.style_solid,
+         text = i_zoneTxt ? f_zoneText(z) : "", text_size = size.small, text_color = c,
+         text_halign = f_zoneHalign(z.tfi), text_valign = z.dir == 1 ? text.align_bottom : text.align_top)
+    if i_quads
+        float h = z.top - z.bot
+        z.q1 := line.new(z.t0, z.bot + h * 0.25, rt, z.bot + h * 0.25, xloc = xloc.bar_time, color = color.new(c, 60), style = line.style_dotted)
+        z.q2 := line.new(z.t0, z.bot + h * 0.50, rt, z.bot + h * 0.50, xloc = xloc.bar_time, color = color.new(c, 20), style = line.style_dashed)
+        z.q3 := line.new(z.t0, z.bot + h * 0.75, rt, z.bot + h * 0.75, xloc = xloc.bar_time, color = color.new(c, 60), style = line.style_dotted)
 
 // Keep the closest N zones per timeframe and side; unconfirmed "S&D?" zones
 // are dropped before confirmed ones.
@@ -345,22 +379,9 @@ f_addZone(int i, int dir, float top, float bot, int tags, int t0) =>
     if not na(top) and not na(bot) and top > bot and not na(t0)
         bool  liq = tags == 1 or tags == 5
         bool  sr  = tags >= 4
-        color c   = dir == 1 ? i_cDem : i_cSup
-        int   rt  = time + i_extBars * chartMs
-        int   bw  = i == 0 ? 3 : i == 3 ? 1 : 2
-        Zone z = Zone.new(tfi = i, dir = dir, top = top, bot = bot, liq = liq, sd = false, sr = sr, t0 = t0, born = time, ext = dir == 1 ? top : bot, inside = false, tapped = false, tapBar = na, wickThru = false)
-        bool pend = f_pending(z)
-        z.bx := box.new(t0, top, rt, bot, xloc = xloc.bar_time,
-             bgcolor = color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT),
-             border_color = c, border_width = bw,
-             border_style = pend ? line.style_dashed : line.style_solid,
-             text = i_zoneTxt ? f_zoneText(z) : "", text_size = size.small, text_color = c,
-             text_halign = text.align_right, text_valign = dir == 1 ? text.align_bottom : text.align_top)
-        if i_quads
-            float h = top - bot
-            z.q1 := line.new(t0, bot + h * 0.25, rt, bot + h * 0.25, xloc = xloc.bar_time, color = color.new(c, 60), style = line.style_dotted)
-            z.q2 := line.new(t0, bot + h * 0.50, rt, bot + h * 0.50, xloc = xloc.bar_time, color = color.new(c, 20), style = line.style_dashed)
-            z.q3 := line.new(t0, bot + h * 0.75, rt, bot + h * 0.75, xloc = xloc.bar_time, color = color.new(c, 60), style = line.style_dotted)
+        Zone z = Zone.new(tfi = i, dir = dir, top = top, bot = bot, liq = liq, sd = false, sr = sr, t0 = t0, born = time, ext = dir == 1 ? top : bot, inside = false, tapped = false, tapBar = na, wickThru = false, s4 = false, s5 = false, s6 = false)
+        if not f_far(z)
+            f_drawZone(z)
         array.push(zones, z)
         f_prune(i, dir)
         if liq or sr
@@ -386,20 +407,31 @@ if array.size(zones) > 0
         else
             bool touch = z.dir == 1 ? low <= z.top : high >= z.bot
             if touch
-                if not z.inside and not f_pending(z)
-                    array.set(fl, 1, true)
+                if not z.inside
+                    // A fresh visit re-arms the one-setup-per-TF rule.
+                    z.s4 := false
+                    z.s5 := false
+                    z.s6 := false
+                    if not f_pending(z)
+                        array.set(fl, 1, true)
                 z.tapped := true
                 z.tapBar := bar_index
             z.inside   := touch
             z.wickThru := z.dir == 1 ? low < z.bot : high > z.top
+            bool far = f_far(z)
+            if far and not na(z.bx)
+                f_delZone(z)
+            else if not far and na(z.bx)
+                f_drawZone(z)
             bool  pend = f_pending(z)
             color c    = z.dir == 1 ? i_cDem : i_cSup
             int   rt   = time + i_extBars * chartMs
-            box.set_right(z.bx, rt)
-            box.set_border_style(z.bx, z.wickThru or pend ? line.style_dashed : line.style_solid)
-            box.set_bgcolor(z.bx, color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT))
-            if i_zoneTxt
-                box.set_text(z.bx, f_zoneText(z))
+            if not na(z.bx)
+                box.set_right(z.bx, rt)
+                box.set_border_style(z.bx, z.wickThru or pend ? line.style_dashed : line.style_solid)
+                box.set_bgcolor(z.bx, color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT))
+                if i_zoneTxt
+                    box.set_text(z.bx, f_zoneText(z))
             if not na(z.q1)
                 line.set_x2(z.q1, rt)
                 line.set_x2(z.q2, rt)
@@ -408,6 +440,17 @@ if array.size(zones) > 0
 // ============================================================================
 // STRUCTURE EVENTS AND SETUPS
 // ============================================================================
+f_fired(Zone z, int i) =>
+    i == 4 ? z.s4 : i == 5 ? z.s5 : z.s6
+
+f_setFired(Zone z, int i) =>
+    if i == 4
+        z.s4 := true
+    else if i == 5
+        z.s5 := true
+    else
+        z.s6 := true
+
 f_event(int i, int dir, bool choch, float lvl, int pivT, int evTime, bool early) =>
     array.set(effBias, i, dir)
     string kind  = choch ? "CHoCH" : "BOS"
@@ -429,20 +472,23 @@ f_event(int i, int dir, bool choch, float lvl, int pivT, int evTime, bool early)
             label.delete(array.shift(strLbls))
 
     // Setup: a structure-TF break in the zone's direction, shortly after price
-    // traded into a confirmed zone. The highest-timeframe zone wins.
+    // traded into a confirmed zone. The highest-timeframe zone wins, and each
+    // zone fires once per structure TF per visit.
     if i >= 4 and (choch or i_setupBos)
         Zone best = na
         for z in zones
-            if z.dir == dir and not f_pending(z) and z.tapped and bar_index - z.tapBar <= i_setupWin
+            if z.dir == dir and not f_pending(z) and z.tapped and bar_index - z.tapBar <= i_setupWin and not f_fired(z, i)
                 if na(best)
                     best := z
                 else if z.tfi < best.tfi
                     best := z
         if not na(best)
+            f_setFired(best, i)
             array.set(fl, dir == 1 ? 2 : 3, true)
             if i_showSetup
-                string txt = array.get(names, i) + " " + kind + " " + arrow + "\nin " + array.get(names, best.tfi) + (dir == 1 ? " demand (" : " supply (") + f_tags(best) + ")"
-                label s = label.new(bar_index, dir == 1 ? low : high, txt, style = dir == 1 ? label.style_label_up : label.style_label_down, color = dir == 1 ? i_cDem : i_cSup, textcolor = color.white, size = size.small)
+                string txt = (dir == 1 ? "▲ " : "▼ ") + array.get(names, i) + " " + kind
+                string tip = array.get(names, i) + " " + kind + " " + arrow + " in " + array.get(names, best.tfi) + (dir == 1 ? " demand (" : " supply (") + f_tags(best) + ")\nZone " + str.tostring(best.bot, format.mintick) + " – " + str.tostring(best.top, format.mintick)
+                label s = label.new(bar_index, dir == 1 ? low : high, txt, style = dir == 1 ? label.style_label_up : label.style_label_down, color = dir == 1 ? i_cDem : i_cSup, textcolor = color.white, size = size.tiny, tooltip = tip)
                 array.push(setupLbls, s)
                 while array.size(setupLbls) > 50
                     label.delete(array.shift(setupLbls))
@@ -530,7 +576,7 @@ f_zoneStatus(int i) =>
             else if z.dir == 1 and z.top < close and not na(a) and a > 0
                 float d = (close - z.top) / a
                 dDn := na(dDn) ? d : math.min(dDn, d)
-    string txt = inTxt != "" ? inTxt : "S " + (na(dUp) ? "—" : str.tostring(dUp, "#.#")) + " / D " + (na(dDn) ? "—" : str.tostring(dDn, "#.#")) + " ATR"
+    string txt = inTxt != "" ? inTxt : "supply " + (na(dUp) ? "none" : "↑" + str.tostring(dUp, "#.#")) + " · demand " + (na(dDn) ? "none" : "↓" + str.tostring(dDn, "#.#"))
     [txt, inTxt != "" ? inCol : color.silver]
 
 var table dash = table.new(f_dashPos(i_dashPos), 4, 8, bgcolor = color.new(color.black, 70), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
@@ -543,7 +589,7 @@ if barstate.islast
         table.cell(dash, 0, 0, "TF",         text_color = color.white, bgcolor = hdr, text_size = dsz)
         table.cell(dash, 1, 0, "Bias",       text_color = color.white, bgcolor = hdr, text_size = dsz)
         table.cell(dash, 2, 0, "Last break", text_color = color.white, bgcolor = hdr, text_size = dsz)
-        table.cell(dash, 3, 0, "Zone",       text_color = color.white, bgcolor = hdr, text_size = dsz)
+        table.cell(dash, 3, 0, "Nearest zone (ATR away)", text_color = color.white, bgcolor = hdr, text_size = dsz)
         for i = 0 to 6
             int r = i + 1
             table.cell(dash, 0, r, array.get(names, i), text_color = color.white, text_size = dsz, text_halign = text.align_left)
