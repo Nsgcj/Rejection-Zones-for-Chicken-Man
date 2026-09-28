@@ -691,18 +691,18 @@ if eff_show_ftc and ssl_ftc and this_week
 
 // ── DOL ─────────────────────────────────────────────────────────────────────
 if eff_show_dol and dol_bsl and not dol_bsl[1] and this_week
-    label.new(bar_index, _yu, "DOL: BSL ^", color = color.new(i_c_dol_bull, 100), style = label.style_none, textcolor = i_c_dol_bull, size = _labelSize(i_sz_dol), tooltip = "Draw on Liquidity — Buy Side\nStructure bias is bullish", with an unswept BSL above @ " + str.tostring(nearest_bsl, format.mintick) + ".\nThe nearest untouched pool in front of price sits above. That is the direction of least resistance until it is taken.")
+    label.new(bar_index, _yu, "DOL: BSL ^", color = color.new(i_c_dol_bull, 100), style = label.style_none, textcolor = i_c_dol_bull, size = _labelSize(i_sz_dol), tooltip = "Draw on Liquidity — Buy Side\nStructure bias is bullish, with an unswept BSL above @ " + str.tostring(nearest_bsl, format.mintick) + ".\nThe nearest untouched pool in front of price sits above. That is the direction of least resistance until it is taken.")
     _yu += _step
 if eff_show_dol and dol_ssl and not dol_ssl[1] and this_week
-    label.new(bar_index, _yd, "DOL: SSL v", color = color.new(i_c_dol_bear, 100), style = label.style_none, textcolor = i_c_dol_bear, size = _labelSize(i_sz_dol), tooltip = "Draw on Liquidity — Sell Side\nStructure bias is bearish", with an unswept SSL below @ " + str.tostring(nearest_ssl, format.mintick) + ".\nThe nearest untouched pool in front of price sits below. That is the direction of least resistance until it is taken.")
+    label.new(bar_index, _yd, "DOL: SSL v", color = color.new(i_c_dol_bear, 100), style = label.style_none, textcolor = i_c_dol_bear, size = _labelSize(i_sz_dol), tooltip = "Draw on Liquidity — Sell Side\nStructure bias is bearish, with an unswept SSL below @ " + str.tostring(nearest_ssl, format.mintick) + ".\nThe nearest untouched pool in front of price sits below. That is the direction of least resistance until it is taken.")
     _yd -= _step
 
 // ── Validated BOS ───────────────────────────────────────────────────────────
 if eff_show_vbos and mss_bull_validated and this_week
-    label.new(bar_index, _yd, "VALID BOS ^", color = i_c_vbos_bull, style = label.style_label_up, textcolor = i_tc_vbos_bull, size = _labelSize(i_sz_vbos), tooltip = "Validated Bullish BOS\nA structural break the Chandelier trend already agreed with\n  • Chandelier: long\n\nThis is a confluence filter, not a prediction — it removes breaks that fire against the prevailing trend, which are the ones most likely to fail.")
+    label.new(bar_index, _yd, "VALID BOS ^", color = i_c_vbos_bull, style = label.style_label_up, textcolor = i_tc_vbos_bull, size = _labelSize(i_sz_vbos), tooltip = "Validated Bullish BOS\nA structural break the Chandelier trend already agreed with\n  • Chandelier: long\nThis is a confluence filter, not a prediction — it removes breaks that fire against the prevailing trend, which are the ones most likely to fail.")
     _yd -= _step
 if eff_show_vbos and mss_bear_validated and this_week
-    label.new(bar_index, _yu, "VALID BOS v", color = i_c_vbos_bear, style = label.style_label_down, textcolor = i_tc_vbos_bear, size = _labelSize(i_sz_vbos), tooltip = "Validated Bearish BOS\nA structural break the Chandelier trend already agreed with\n  • Chandelier: short\n\nThis is a confluence filter, not a prediction — it removes breaks that fire against the prevailing trend, which are the ones most likely to fail.")
+    label.new(bar_index, _yu, "VALID BOS v", color = i_c_vbos_bear, style = label.style_label_down, textcolor = i_tc_vbos_bear, size = _labelSize(i_sz_vbos), tooltip = "Validated Bearish BOS\nA structural break the Chandelier trend already agreed with\n  • Chandelier: short\nThis is a confluence filter, not a prediction — it removes breaks that fire against the prevailing trend, which are the ones most likely to fail.")
     _yu += _step
 
 // ============================================================================
