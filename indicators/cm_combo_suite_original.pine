@@ -1,0 +1,3062 @@
+//@version=6
+indicator("Chicken-Man Combo Suite (trimmed)", shorttitle = "CM Combo", overlay = true,
+     max_boxes_count  = 500,
+     max_labels_count = 500,
+     max_lines_count  = 500)
+
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//
+// ============================================================================
+// CHICKEN-MAN COMBO SUITE (TRIMMED)
+// ----------------------------------------------------------------------------
+// Four modules pasted into one indicator:
+//
+//   SMC-LIQ+ (trimmed)        — structure / liquidity / VWMA-Ehlers-Chandelier
+//                                regime / pivots / psych levels. Its own M2b
+//                                (Session Filter) and M8 (Confluence Signals)
+//                                sub-modules are removed here, not just hidden.
+//   369 Time Cycle Matrix     — 3/6/9 hourly time-cycle shading, Market
+//                                Sessions (Asia/London/NY) and statistics —
+//                                all controlled by 369's own native toggles.
+//   Delta Zones               — buy/sell delta-pressure reaction zones
+//                                (ZigZag overlay removed — see below)
+//   Candlestick Patterns      — curated to 14 high-conviction patterns out
+//                                of ~40 in the standalone script, to reduce
+//                                label/alert count.
+//
+// Three real compile/runtime issues drove these cuts, all found by actually
+// testing this file in TradingView:
+//   1. The untrimmed four-module merge exceeded Pine's #main function size
+//      limit ("the body of the #main function is too long") at ~3,200
+//      combined lines. Removing SMC-LIQ+'s M2b/M8 got it compiling.
+//   2. Importing DevLucem/ZigLib/1 (Delta Zones' optional ZigZag overlay)
+//      alone then hit RE10140 "too many plots" — this script's own
+//      plot()/plotshape() calls never exceed ~20, so the overflow traces to
+//      the imported library, not to anything here. Removed entirely.
+//   3. alertcondition() calls count toward that same 64-slot plot budget —
+//      confirmed via TradingView's own support docs after the count was
+//      still over 64 with ZigZag gone. Removed alertcondition() from
+//      Candlestick Patterns and Delta Zones (detection, labels and drawn
+//      shapes are untouched; only per-event TradingView alerts are gone
+//      for those two modules in this file).
+// See indicators/smc_liq_plus.pine, indicators/delta_zones.pine and
+// indicators/all_candlestick_patterns.pine for the full, untrimmed
+// standalone versions of each of these.
+//
+// No master "enable this whole module" toggle here on purpose: each
+// module below keeps exactly the settings groups and toggles it has
+// standalone — one list per module, nothing added on top. To turn a
+// whole module off, set its own toggles off (e.g. SMC-LIQ+'s M1–M7
+// Quick Toggles group; 369's "Enable 369 blocks" and "Enable sessions";
+// Delta Zones' Show Buy/Sell/HTF Boxes; each candlestick pattern's own
+// checkbox).
+// ============================================================================
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE — SMC-LIQ+ TRIMMED (structure / liquidity / regime — no M2b, no M8)
+// ══════════════════════════════════════════════════════════════════════════
+
+// ============================================================================
+// SMC-LIQ+  —  STRUCTURE / LIQUIDITY / REGIME UNIFIED SCANNER
+// ----------------------------------------------------------------------------
+// Merged from four source scripts:
+//   1. SMC Unified Liquidity & MSS Scanner (v5)  — Steps 3 & 4 retained only
+//   2. Multi-VWMA + Ehlers Baseline + Chandelier Exit v2 (v6)
+//   3. Psycho + Pivots Pro (CJ+Nova) (v6)
+//   4. Chandelier Exit (TradingView library version) — superseded by 2
+//
+// Retained from source 1: S3 Live Structure Lines, S4 Liquidity.
+// Everything else from source 1 (HTF bias, 3-tier structure labels, FVG/OB,
+// Operating Range, killzone drawing, CSD, MMM, strategies S1/S2/S3, risk
+// sizing) has been removed per spec.
+//
+// Two features had their inputs scrapped and were rewired rather than dropped:
+//   - DOL  (Draw on Liquidity) originally read OB/FVG "internal fuel" (Step 5).
+//     It now reads live structure bias, optionally gated by VWMA regime.
+//   - VALID BOS originally read the Operating Range premium/discount sectors
+//     (Step 6). It now reads VWMA regime + Chandelier direction alignment.
+// Both are documented at their definitions and can be switched off.
+//
+// Platform: TradingView Pine Script v6
+// ============================================================================
+
+// ============================================================================
+// SECTION 0 — INPUTS
+// ============================================================================
+
+const string GRP_QT1 = "▶ QUICK TOGGLES · 1 — Structure & Liquidity (SMC core)"
+const string GRP_QT2 = "▶ QUICK TOGGLES · 2 — Trend & Regime Confirmation"
+const string GRP_QT3 = "▶ QUICK TOGGLES · 3 — Reference Levels"
+const string GRP_QT4 = "▶ QUICK TOGGLES · 4 — Time & Session Context"
+const string GRP_QT5 = "▶ QUICK TOGGLES · 5 — Order Flow & Patterns"
+const string GRP_QT6 = "▶ QUICK TOGGLES · 6 — Trade Planning"
+
+// ── Quick Toggles — one master switch per module, grouped by how they're
+// used together and ordered from core signal (top) to trade planning
+// (bottom). Each keeps its own independent settings group below for
+// fine control once switched on. ──────────────────────────────────────────
+i_rs_enable  = input.bool(false,  "M1  Live Structure Lines", group = GRP_QT1, tooltip = "TIMEFRAME: 5m–15m for internal BOS/CHoCH, 15m–1h for swing BOS/CHoCH.\nROLE: Real-time break detection — draws a line the moment a short-term or intermediate swing is broken and classifies it as BOS (continuation) or CHoCH (reversal).\nREASON: A CHoCH at an unswept liquidity level is the highest-conviction reversal read in the model. BOS tells you the existing leg is extending.\nEND GOAL: Solid lines for BOS, dashed for CHoCH, dotted extending lines for every unbroken level — an unambiguous picture of who is in control.\nNOTE: The structure engine keeps running when this is OFF because the Liquidity module's DOL and the HUD read its bias. Only the drawings are suppressed.")
+i_liq_enable = input.bool(false,  "M2  Liquidity",            group = GRP_QT1, tooltip = "TIMEFRAME: Any — most actionable on 5m–1h.\nROLE: Identifies the draw on liquidity — BSL (buy stops above swing highs) and SSL (sell stops below swing lows).\nREASON: Price is always reaching for the nearest resting order pool. Knowing where BSL and SSL sit tells you WHERE price is headed before it gets there.\nEND GOAL: Dotted lines above every swing high and below every swing low that auto-delete when swept, plus sweep markers, FTC (failed-to-close) reversals and DOL directional bias.")
+i_vw_enable  = input.bool(false,  "M3  VWMA Regime",          group = GRP_QT2, tooltip = "TIMEFRAME: Any. HTF leg is bound to its own timeframe setting.\nROLE: Two 200-period volume-weighted moving averages — one on the chart timeframe, one locked to a timeframe you choose — used together as a trend regime gate.\nREASON: VWMA weights price by volume, so it leans toward levels where business actually transacted rather than where price merely printed. Two of them at different resolutions give you a fast and a slow read of the same thing.\nEND GOAL: A binary regime state (up / down) that filters the DOL bias, plus two plotted lines you can trade off directly.\nFalls back to EMA automatically on symbols that publish no volume.")
+i_bl_enable  = input.bool(false,  "M4  Baseline",             group = GRP_QT2, tooltip = "TIMEFRAME: Any.\nROLE: A single smoothed trigger line — Ehlers 2-pole Super Smoother by default, with Triangular MA and EMA as alternatives.\nREASON: The Super Smoother has far less lag than a triangular MA of the same length and suppresses the 2–3 bar noise that causes most false baseline crosses. That noise is the main reason simple MA-cross systems bleed.\nEND GOAL: A colour-coded rising/falling baseline.")
+i_ce_enable  = input.bool(false,  "M5  Chandelier Exit",      group = GRP_QT2, tooltip = "TIMEFRAME: Any.\nROLE: ATR trailing stop anchored to the highest high / lowest low of a lookback window, plus the long/short trend state that stop implies.\nREASON: A volatility-scaled trailing stop keeps you in a move as long as the move behaves, and takes you out on a genuine character change rather than a fixed-point giveback.\nEND GOAL: A ratcheting stop line that only ever moves in your favour, flip markers where the trend state changes, and the directional gate for Validated BOS.")
+i_pp_enable  = input.bool(false,  "M6  Pivot Points Pro",     group = GRP_QT3, tooltip = "TIMEFRAME: Any. The pivot anchor timeframe is independent of the chart.\nROLE: Classic floor-trader pivot levels — Traditional, Fibonacci, Woodie, Classic, DM or Camarilla — drawn per anchor period with labels and prices.\nREASON: Pivots are the most widely watched mechanical levels in existence. That is precisely what makes them useful: they are where a large number of resting orders end up regardless of whether the maths behind them means anything.\nEND GOAL: Historical and current pivot rows, each level individually toggleable and colourable.\nBUDGET NOTE: 11 levels × 'Number Back' rows consumes drawing objects fast. See the Display group.")
+i_psy_enable = input.bool(false, "M7  Psychological Levels", group = GRP_QT3, tooltip = "TIMEFRAME: Any.\nROLE: Round-number magnet levels at three significant-digit depths (strong / medium / weak), each with an optional half-step.\nREASON: Stops and limit orders cluster at round numbers far more than at arbitrary prices. The Zipf transparency option fades each level by its leading digit, so the rounder the number the more solid the line.\nEND GOAL: A background lattice of round-number levels.\nDefault OFF — this was not in the requested feature set, but the module ships with the merge and costs nothing while disabled.")
+enable369 = input.bool(false, "Enable 369 blocks", group = GRP_QT4)
+enableSess = input.bool(false, "Enable sessions", group = GRP_QT4,
+     tooltip = "Sessions provide context for the 369 windows. They never feed " +
+               "into window detection - a 369 window is defined by the clock " +
+               "alone, so it cannot drift when a session definition changes.")
+enableStats = input.bool(false, "Collect statistics", group = GRP_QT4,
+     tooltip = "Numeric only - no drawings. Every completed hour is recorded, " +
+               "369 or not, so the baseline is collected by the same code path " +
+               "as the 369 population rather than a parallel one.")
+enableDeltaZones = input.bool(false, "Delta Zones", group = GRP_QT5, tooltip = "Master switch for the whole Delta Zones module: current-TF and HTF buy/sell reaction boxes plus the Buy/Sell Pressure arrows. Show Buy Boxes, Show Sell Boxes and Enable HTF Boxes (in the Delta Zones settings groups below) still control which pieces draw once this is on.")
+enableCandles = input.bool(false, "Candlestick Patterns", group = GRP_QT5, tooltip = "Master switch for the whole All Candlestick Patterns module. Each pattern below still has its own checkbox for fine control once this is on.")
+enableAtrSltp = input.bool(false, "ATR SL/TP Table", group = GRP_QT6, tooltip = "Master switch for the ATR SL/TP Table module: the manual-entry stop/target table and its optional chart lines. Off by default like every other module here.")
+
+const string GRP_RS    = "M1 ▸ Live Structure Lines  |  5m–1h  |  Real-time BOS & CHoCH"
+const string GRP_LIQ   = "M2 ▸ Liquidity  |  Any TF  |  BSL / SSL draw-on-liquidity targets"
+const string GRP_VW    = "M3 ▸ VWMA Regime  |  Any TF  |  Chart 200 + HTF 200 trend filter"
+const string GRP_BL    = "M4 ▸ Baseline  |  Any TF  |  Ehlers Super Smoother trigger line"
+const string GRP_CE    = "M5 ▸ Chandelier Exit  |  Any TF  |  ATR trailing stop & trend state"
+const string GRP_PP    = "M6 ▸ Pivot Points Pro  |  Any TF  |  Floor-trader pivot levels"
+const string GRP_PPL   = "M6b ▸ Pivot Points — Levels & Labels"
+const string GRP_PSY   = "M7 ▸ Psychological Levels  |  Any TF  |  Round-number magnets"
+const string GRP_VIZ   = "Display — Global chart toggles"
+const string GRP_STYLE = "Style & Colors — Line weights, label sizes, palettes"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QUICK TOGGLES — module master switches
+// Every module below is fully self-contained. Turning one OFF removes all of
+// its drawings, its HUD rows and its alerts, and costs nothing elsewhere —
+// with two documented exceptions noted in each tooltip.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── M1: LIVE STRUCTURE LINES ─────────────────────────────────────────────────
+i_show_int_struct = input.bool(true, "Internal BOS/CHoCH  (short-term tier)", group = GRP_RS, tooltip = "Draws a line between the broken short-term high/low and the break candle. Solid = BOS (continuation), dashed = CHoCH (reversal). Use on 5m for entries, 15m for context. A CHoCH at an unswept liquidity level is the highest-conviction entry in this model.")
+i_show_sw_struct  = input.bool(true, "Swing BOS/CHoCH  (intermediate tier)",  group = GRP_RS, tooltip = "Same as Internal but based on the intermediate pivot. A swing CHoCH on 15m or 1h represents a larger structural shift — use it to flip your intraday bias rather than as a direct entry trigger.")
+i_show_eqhl       = input.bool(true, "EQH / EQL equal-level lines",           group = GRP_RS, tooltip = "Detects when two consecutive short-term highs or lows sit within tolerance of each other, marking a double-top / double-bottom liquidity cluster. These are high-probability sweep targets — both highs were engineered to rest stops above them.")
+i_show_mss_lbl    = input.bool(true, "MSS / BOS / CHoCH labels",              group = GRP_RS, tooltip = "Labels on the exact bar a Market Structure Shift is confirmed at a liquidity level. CHoCH = reversal (higher conviction), BOS = continuation.")
+i_show_vbos       = input.bool(true, "Validated BOS labels",                  group = GRP_RS, tooltip = "REWIRED FEATURE. In the source script a BOS was 'validated' by price having previously visited the Operating Range discount/premium sector — that module was scrapped.\nIt is now validated by regime agreement instead: VALID BOS ^ fires when a bullish MSS lands while the VWMA regime is up AND the Chandelier is long. VALID BOS v is the mirror.\nRequires M3 and M5 to be enabled. If either is off, validation falls back to whichever is still on; if both are off no validated labels fire.")
+i_sth_len         = input.int(1,     "Short-term swing lookback",             group = GRP_RS, minval = 1, maxval = 5,  tooltip = "Controls the 3-candle short-term high/low rule. A value of 1 means high[1] > high[0] and high[1] > high[2]. 1 is correct for this methodology — raise it only if your instrument is unusually noisy.")
+i_ith_len         = input.int(5,     "Intermediate swing lookback",           group = GRP_RS, minval = 3, maxval = 20, tooltip = "Pivot lookback for intermediate swings. 5 bars confirms an intermediate high/low on your chart timeframe. This tier drives the swing BOS/CHoCH lines.")
+i_eqhl_tol        = input.float(0.1, "EQH/EQL tolerance (%)",                 group = GRP_RS, minval = 0.01, maxval = 1.0, step = 0.01, tooltip = "Two consecutive swing highs count as equal if they differ by less than this percentage of price. 0.10% works on most instruments; raise to 0.15–0.25% on crypto or high-volatility pairs.")
+i_struct_ext      = input.int(50,    "Unbroken level extend (bars right)",    group = GRP_RS, minval = 5, maxval = 300, tooltip = "Dotted horizontal line from each unbroken swing level extends this many bars to the right, showing the level is still active.")
+i_struct_keep     = input.int(12,    "Break lines to keep",                   group = GRP_RS, minval = 2, maxval = 60,  tooltip = "How many historical BOS/CHoCH lines to retain per tier before the oldest is deleted. Raise for backreading, lower to keep the chart clean and stay inside the 500-object drawing budget.")
+
+// ── M2: LIQUIDITY POOLS ──────────────────────────────────────────────────────
+i_show_bsl    = input.bool(true,  "Show BSL lines",                     group = GRP_LIQ, tooltip = "Dotted line above each confirmed swing high where buy stops rest. Deleted the moment price sweeps through it.")
+i_show_ssl    = input.bool(true,  "Show SSL lines",                     group = GRP_LIQ, tooltip = "Dotted line below each confirmed swing low where sell stops rest. Deleted the moment price sweeps through it.")
+i_show_liq_lbl= input.bool(true,  "Show BSL / SSL level labels",        group = GRP_LIQ, tooltip = "Prints a BSL or SSL tag at each new pivot as the level is created. Turn off if the chart gets crowded — the lines alone carry the same information.")
+i_show_sweep  = input.bool(true,  "Show sweep markers",                 group = GRP_LIQ, tooltip = "Label fires on the exact bar a BSL or SSL is taken.")
+i_show_ftc    = input.bool(true,  "Show FTC (Failed to Close) labels",  group = GRP_LIQ, tooltip = "FTC BEAR: a wick swept a BSL but the candle CLOSED back below it — failed auction, the move above was rejected.\nFTC BULL: a wick swept an SSL but the candle CLOSED back above it.\nThis is the wick-vs-body distinction that separates a stop hunt from a genuine breakout. A body close beyond the level is expansion, not a sweep.")
+i_show_dol    = input.bool(true,  "Show DOL (Draw on Liquidity) labels", group = GRP_LIQ, tooltip = "REWIRED FEATURE. In the source script DOL required 'internal fuel' from Order Blocks or FVGs — both scrapped.\nIt now reads live structure bias instead: DOL: BSL ^ fires when structure is bullish and an unswept BSL sits above; DOL: SSL v is the mirror.\nSee 'DOL requires VWMA regime agreement' below to tighten it.")
+i_dol_regime  = input.bool(true,  "DOL requires VWMA regime agreement", group = GRP_LIQ, tooltip = "ON: a DOL label needs structure bias AND the VWMA regime pointing the same way. Far fewer, better labels.\nOFF: structure bias alone is enough — closer to the original behaviour, noisier.\nIgnored when M3 VWMA Regime is disabled.")
+i_swing_len   = input.int(10,     "Swing lookback (bars)",              group = GRP_LIQ, minval = 3, maxval = 50,  tooltip = "Bars required on BOTH sides of a pivot to confirm a valid swing high/low. 10 means the pivot must be the extreme of a 21-bar window. Raise to 15–20 on 1h+ to cut noise; drop to 5–7 on 1m–5m for more granular levels.\nNOTE: a pivot is only confirmed this many bars AFTER it forms. That lag is inherent to pivot detection, not a bug.")
+i_liq_extend  = input.int(100,    "BSL/SSL line extend (bars)",         group = GRP_LIQ, minval = 10, maxval = 500, tooltip = "How far each BSL/SSL line extends to the right before being swept or trimmed. 100 bars is roughly 8 hours on a 5m chart.")
+i_liq_eq_tol  = input.float(0.05, "Equal H/L cluster tolerance (%)",    group = GRP_LIQ, minval = 0.0, maxval = 1.0, step = 0.01, tooltip = "Two pivot highs are treated as one liquidity level if they sit within this percentage of each other. Clusters nearby stops into a single line instead of drawing two.")
+i_liq_max     = input.int(20,     "Max stored levels per side",         group = GRP_LIQ, minval = 5, maxval = 60,  tooltip = "Oldest unswept levels are trimmed once the pool exceeds this. Raising it keeps deeper history at the cost of drawing objects.")
+i_liq_prox    = input.float(1.5,  "Proximity to level (× ATR)",         group = GRP_LIQ, minval = 0.1, maxval = 5.0, step = 0.1, tooltip = "How close price must come to the nearest BSL/SSL to count as 'at liquidity'. This gates the MSS-at-liquidity labels and the near-liquidity alerts.\nThe source script hard-coded 1.5 here while its alert text claimed 0.5 — the value is now explicit and the alert text matches it.")
+i_mss_confirm = input.int(1,      "MSS confirmation closes",            group = GRP_LIQ, minval = 1, maxval = 5, tooltip = "Consecutive closes beyond the swing level required before a Market Structure Shift is confirmed. 1 reacts on the break candle. 2–3 gives fewer false signals but a later entry.")
+i_atr_len     = input.int(14,     "ATR length (proximity & spacing)",   group = GRP_LIQ, minval = 2, maxval = 100, tooltip = "ATR period used for liquidity proximity and for vertical label spacing. Separate from the Chandelier Exit's own ATR setting.")
+
+// ── M3: VWMA REGIME ──────────────────────────────────────────────────────────
+i_vw_reg_len    = input.int(200, "Chart VWMA length", group = GRP_VW, minval = 1, tooltip = "Length of the VWMA calculated on the chart timeframe. 200 is the requested default.")
+i_vw_htf_len    = input.int(200, "HTF VWMA length",   group = GRP_VW, minval = 1, tooltip = "Length of the VWMA calculated on the fixed timeframe below. 200 is the requested default — this is the second of the two 200 VWMAs, the one pinned to its own resolution.")
+i_vw_htf_tf     = input.timeframe("10", "HTF VWMA timeframe", group = GRP_VW, tooltip = "The timeframe the second VWMA is locked to, independent of your chart. Setting this LOWER than the chart timeframe is meaningless — the HTF value gets smeared across the chart bar. The HUD warns you when that happens.")
+i_vw_nonrepaint = input.bool(true, "Non-repainting HTF (last closed bar)", group = GRP_VW, tooltip = "ON: the HTF VWMA only updates when its bar closes, so history and realtime agree — what you backtest is what you get.\nOFF: the value moves inside the forming HTF bar. It looks smoother live but the historical line is a lie. Leave this ON unless you know exactly why you want it off.")
+i_vw_filter     = input.string("Both VWMAs", "Regime filter mode", options = ["Off", "Chart VWMA only", "HTF VWMA only", "Either VWMA", "Both VWMAs"], group = GRP_VW, tooltip = "Which VWMAs price must be on the right side of for the regime to count as aligned.\nBoth VWMAs = strictest, fewest signals. Either VWMA = loosest. Off = regime always passes, turning M8 into a pure baseline-and-Chandelier system.")
+
+// ── M4: BASELINE ─────────────────────────────────────────────────────────────
+i_bl_type = input.string("Super Smoother", "Baseline type", options = ["Super Smoother", "Triangular MA", "EMA"], group = GRP_BL, tooltip = "Super Smoother is Ehlers' 2-pole filter: much less lag than a triangular MA at the same length, and it kills the 2–3 bar noise responsible for most false crosses. Triangular MA and EMA are kept for comparison.")
+i_bl_len  = input.int(14, "Baseline length", group = GRP_BL, minval = 2, tooltip = "Filter period. Shorter reacts faster and whipsaws more.")
+i_bl_src  = input.source(close, "Baseline source", group = GRP_BL, tooltip = "Series the baseline is computed from, and the series that must cross it to trigger an M8 signal.")
+
+// ── M5: CHANDELIER EXIT ──────────────────────────────────────────────────────
+i_ce_len      = input.int(22,   "CE lookback length", group = GRP_CE, minval = 1, tooltip = "Bars used to find the highest high / lowest low the stop hangs from.")
+i_ce_atr_len  = input.int(22,   "CE ATR length",      group = GRP_CE, minval = 1, tooltip = "ATR period for the stop distance. Independent of the liquidity ATR.")
+i_ce_mult     = input.float(3.0,"CE ATR multiplier",  group = GRP_CE, minval = 0.1, step = 0.1, tooltip = "How many ATRs the stop sits away from the extreme. 3.0 is the classic setting. Lower exits sooner and gets stopped more often; higher survives noise but gives back more.")
+i_ce_useclose = input.bool(true,"Use closing price for extremes", group = GRP_CE, tooltip = "Standard Chandelier behaviour. Anchoring to closes instead of wicks stops a single spike from parking the stop miles away.")
+i_show_flips  = input.bool(true,"Show CE flip markers", group = GRP_CE, tooltip = "Dots where the Chandelier trend state changes. These mark the moment the trailing stop was breached — they are exits, not entries.")
+
+// ── M6: PIVOT POINTS PRO ─────────────────────────────────────────────────────
+i_pp_type     = input.string("Traditional", "Pivot type", options = ["Traditional", "Fibonacci", "Woodie", "Classic", "DM", "Camarilla"], group = GRP_PP, tooltip = "Formula used to derive the levels. Traditional is the floor-trader standard. DM produces only P/S1/R1; Fibonacci has no level 4 or 5.")
+i_pp_anchor   = input.string("Auto", "Pivot timeframe", options = ["Auto", "Daily", "Weekly", "Monthly", "Quarterly", "Yearly", "Biyearly", "Triyearly", "Quinquennially", "Decennially"], group = GRP_PP, tooltip = "Anchor period each pivot row is calculated from. Auto picks Daily on intraday charts up to 15m, Weekly above that, Monthly on daily charts and Yearly higher.")
+i_pp_back     = input.int(15, "Number of historical rows", group = GRP_PP, minval = 1, maxval = 200, tooltip = "How many past anchor periods to keep drawn.\nBUDGET WARNING: each row costs up to 11 lines AND 11 labels. At 15 rows that is 165 of each, out of a 500 total shared with liquidity and structure. If levels start disappearing, lower this first.")
+i_pp_daily    = input.bool(true, "Use daily-based values", group = GRP_PP, tooltip = "ON: levels are computed from higher-timeframe OHLC via a data request — the standard, and the only mode that works on short intraday charts.\nOFF: levels are computed from chart bars only, which needs enough intraday history to cover a whole anchor period.")
+i_pp_width    = input.int(1, "Line width", group = GRP_PP, minval = 1, maxval = 10, tooltip = "Pixel width of every pivot line.")
+i_pp_labels   = input.bool(true, "Show level names", group = GRP_PP, inline = "pplbl", tooltip = "Print the level name (P, R1, S1, …) on each line.")
+i_pp_prices   = input.bool(true, "Show prices",      group = GRP_PP, inline = "pplbl", tooltip = "Print the numeric level next to each line.")
+i_pp_lblpos   = input.string("Left", "Label position", options = ["Left", "Right"], group = GRP_PP, tooltip = "Left anchors labels at the start of each pivot period, Right at the end.")
+
+_pp_lvl23 = i_pp_type != "DM"
+_pp_lvl4  = i_pp_type != "DM" and i_pp_type != "Fibonacci"
+_pp_lvl5  = i_pp_type == "Traditional" or i_pp_type == "Camarilla"
+const color PP_DEF = #FB8C00
+i_pp_c_p  = input.color(PP_DEF, "P",  inline = "P",     group = GRP_PPL)
+i_pp_s_p  = input.bool(true,    "",   inline = "P",     group = GRP_PPL)
+i_pp_c_s1 = input.color(PP_DEF, "S1", inline = "S1/R1", group = GRP_PPL)
+i_pp_s_s1 = input.bool(true,    "",   inline = "S1/R1", group = GRP_PPL)
+i_pp_c_r1 = input.color(PP_DEF, "R1", inline = "S1/R1", group = GRP_PPL)
+i_pp_s_r1 = input.bool(true,    "",   inline = "S1/R1", group = GRP_PPL)
+i_pp_c_s2 = input.color(PP_DEF, "S2", inline = "S2/R2", group = GRP_PPL, active = _pp_lvl23)
+i_pp_s_s2 = input.bool(true,    "",   inline = "S2/R2", group = GRP_PPL, active = _pp_lvl23)
+i_pp_c_r2 = input.color(PP_DEF, "R2", inline = "S2/R2", group = GRP_PPL, active = _pp_lvl23)
+i_pp_s_r2 = input.bool(true,    "",   inline = "S2/R2", group = GRP_PPL, active = _pp_lvl23)
+i_pp_c_s3 = input.color(PP_DEF, "S3", inline = "S3/R3", group = GRP_PPL, active = _pp_lvl23)
+i_pp_s_s3 = input.bool(true,    "",   inline = "S3/R3", group = GRP_PPL, active = _pp_lvl23)
+i_pp_c_r3 = input.color(PP_DEF, "R3", inline = "S3/R3", group = GRP_PPL, active = _pp_lvl23)
+i_pp_s_r3 = input.bool(true,    "",   inline = "S3/R3", group = GRP_PPL, active = _pp_lvl23)
+i_pp_c_s4 = input.color(PP_DEF, "S4", inline = "S4/R4", group = GRP_PPL, active = _pp_lvl4)
+i_pp_s_s4 = input.bool(true,    "",   inline = "S4/R4", group = GRP_PPL, active = _pp_lvl4)
+i_pp_c_r4 = input.color(PP_DEF, "R4", inline = "S4/R4", group = GRP_PPL, active = _pp_lvl4)
+i_pp_s_r4 = input.bool(true,    "",   inline = "S4/R4", group = GRP_PPL, active = _pp_lvl4)
+i_pp_c_s5 = input.color(PP_DEF, "S5", inline = "S5/R5", group = GRP_PPL, active = _pp_lvl5)
+i_pp_s_s5 = input.bool(true,    "",   inline = "S5/R5", group = GRP_PPL, active = _pp_lvl5)
+i_pp_c_r5 = input.color(PP_DEF, "R5", inline = "S5/R5", group = GRP_PPL, active = _pp_lvl5)
+i_pp_s_r5 = input.bool(true,    "",   inline = "S5/R5", group = GRP_PPL, active = _pp_lvl5)
+
+// ── M7: PSYCHOLOGICAL LEVELS ─────────────────────────────────────────────────
+i_psy_src    = input.source(close, "Data source", group = GRP_PSY, tooltip = "Series the round-number lattice is derived from.")
+i_psy_smooth = input.int(1, "Smoothing (SMA)", group = GRP_PSY, minval = 1, maxval = 50, tooltip = "Smooths the stepped level series so it does not jump abruptly as price crosses a boundary. 1 disables smoothing.")
+i_psy_above  = input.float(1.0, "Step ABOVE",      group = GRP_PSY, minval = 0.0, step = 0.5, tooltip = "How many units above the truncated round number the ABOVE levels sit.")
+i_psy_half   = input.float(0.5, "Half-step ABOVE", group = GRP_PSY, minval = 0.0, step = 0.5, tooltip = "Offset for the intermediate half levels.")
+i_psy_below  = input.float(0.0, "Step BELOW",      group = GRP_PSY, maxval = 0.0, step = 0.5, tooltip = "Offset for the BELOW levels. 0 places them exactly on the truncated round number.")
+i_psy_zipf   = input.bool(true, "Zipf transparency", group = GRP_PSY, tooltip = "Fades each level by its leading digit, so rounder numbers draw more solidly. Off uses one fixed transparency for all levels.")
+i_psy_fixed  = input.int(20, "Fixed transparency (Zipf off)", group = GRP_PSY, minval = 0, maxval = 100, step = 5)
+i_psy_c1a = input.color(color.new(color.green, 0),  "Strong ABOVE",      group = GRP_PSY)
+i_psy_c1h = input.color(#81c784,                    "Strong half ABOVE", group = GRP_PSY)
+i_psy_c1b = input.color(color.new(color.red, 0),    "Strong BELOW",      group = GRP_PSY)
+i_psy_c2a = input.color(#90bff9,                    "Medium ABOVE",      group = GRP_PSY)
+i_psy_c2h = input.color(#5b9cf6,                    "Medium half ABOVE", group = GRP_PSY)
+i_psy_c2b = input.color(color.new(color.yellow, 0), "Medium BELOW",      group = GRP_PSY)
+i_psy_c3a = input.color(#9c27b0,                    "Weak ABOVE",        group = GRP_PSY)
+i_psy_c3h = input.color(#512da8,                    "Weak half ABOVE",   group = GRP_PSY)
+i_psy_c3b = input.color(color.new(color.orange, 0), "Weak BELOW",        group = GRP_PSY)
+
+// ── DISPLAY — GLOBAL ─────────────────────────────────────────────────────────
+i_show_history = input.bool(false, "Show full history (OFF = this week only)", group = GRP_VIZ, tooltip = "OFF (default): only structure and liquidity labels from the current calendar week are plotted — a cleaner chart for live trading, and it keeps you well inside the drawing-object budget.\nON: all historical labels are drawn. Useful for backreading; slower, and on long histories the oldest drawings will be dropped automatically once the 500-object limit is hit.\nDoes not affect pivots, VWMAs, baseline or Chandelier — those are continuous.")
+i_show_hud     = input.bool(false,  "Show HUD status table", group = GRP_VIZ, tooltip = "Top-right table summarising live structure, liquidity, regime and signal state, plus a status row that warns about no-volume symbols, an HTF setting below the chart timeframe, and pivot data problems.")
+i_hud_pos      = input.string("Top Right", "HUD position", options = ["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], group = GRP_VIZ)
+i_hud_size     = input.string("Tiny", "HUD text size", options = ["Auto", "Tiny", "Small", "Normal", "Large"], group = GRP_VIZ)
+i_tz           = input.string("America/New_York", "Timezone", group = GRP_VIZ, tooltip = "Drives the Session Filter windows and the 'this week only' history gate. Change only if your feed's session times differ from US Eastern.")
+
+// ── STYLE & COLORS ───────────────────────────────────────────────────────────
+i_c_int_bull   = input.color(color.new(color.teal,   10), "Internal bull", inline = "st_i", group = GRP_STYLE)
+i_c_int_bear   = input.color(color.new(color.red,    10), "bear",          inline = "st_i", group = GRP_STYLE)
+i_c_sw_bull    = input.color(color.new(color.aqua,   10), "Swing bull",    inline = "st_s", group = GRP_STYLE)
+i_c_sw_bear    = input.color(color.new(color.orange, 10), "bear",          inline = "st_s", group = GRP_STYLE)
+i_c_eqh        = input.color(color.new(color.aqua,   30), "EQH",           inline = "st_e", group = GRP_STYLE)
+i_c_eql        = input.color(color.new(color.orange, 30), "EQL",           inline = "st_e", group = GRP_STYLE)
+i_c_mss_bull   = input.color(color.new(color.green,  20), "MSS bull",      inline = "mss",  group = GRP_STYLE)
+i_c_mss_bear   = input.color(color.new(color.red,    20), "bear",          inline = "mss",  group = GRP_STYLE)
+i_tc_mss       = input.color(color.white,                 "text",          inline = "mss",  group = GRP_STYLE)
+i_sz_mss       = input.string("small", "size", options = ["tiny", "small", "normal", "large"], inline = "mss", group = GRP_STYLE)
+i_c_bsl        = input.color(color.new(color.aqua,   30), "BSL line",      inline = "bsl",  group = GRP_STYLE)
+i_w_bsl        = input.int(1, "w", minval = 1, maxval = 4,                 inline = "bsl",  group = GRP_STYLE)
+i_s_bsl        = input.string("dotted", "style", options = ["solid", "dotted", "dashed"], inline = "bsl", group = GRP_STYLE)
+i_c_ssl        = input.color(color.new(color.orange, 30), "SSL line",      inline = "ssl",  group = GRP_STYLE)
+i_w_ssl        = input.int(1, "w", minval = 1, maxval = 4,                 inline = "ssl",  group = GRP_STYLE)
+i_s_ssl        = input.string("dotted", "style", options = ["solid", "dotted", "dashed"], inline = "ssl", group = GRP_STYLE)
+i_c_sweep_bsl  = input.color(color.new(color.aqua,   15), "Sweep BSL",     inline = "swp",  group = GRP_STYLE)
+i_c_sweep_ssl  = input.color(color.new(color.orange, 15), "SSL",           inline = "swp",  group = GRP_STYLE)
+i_tc_sweep     = input.color(color.white,                 "text",          inline = "swp",  group = GRP_STYLE)
+i_sz_sweep     = input.string("small", "size", options = ["tiny", "small", "normal", "large"], inline = "swp", group = GRP_STYLE)
+i_c_ftc_bull   = input.color(color.new(color.green,  10), "FTC bull",      inline = "ftc",  group = GRP_STYLE)
+i_c_ftc_bear   = input.color(color.new(color.red,    10), "bear",          inline = "ftc",  group = GRP_STYLE)
+i_tc_ftc       = input.color(color.white,                 "text",          inline = "ftc",  group = GRP_STYLE)
+i_sz_ftc       = input.string("small", "size", options = ["tiny", "small", "normal", "large"], inline = "ftc", group = GRP_STYLE)
+i_c_dol_bull   = input.color(color.aqua,                  "DOL bull",      inline = "dol",  group = GRP_STYLE)
+i_c_dol_bear   = input.color(color.orange,                "bear",          inline = "dol",  group = GRP_STYLE)
+i_sz_dol       = input.string("small", "size", options = ["tiny", "small", "normal", "large"], inline = "dol", group = GRP_STYLE)
+i_c_vbos_bull  = input.color(color.new(color.lime,    5), "Valid BOS bull",inline = "vb",   group = GRP_STYLE)
+i_c_vbos_bear  = input.color(color.new(color.red,     5), "bear",          inline = "vb",   group = GRP_STYLE)
+i_tc_vbos_bull = input.color(color.black,                 "bull text",     inline = "vb2",  group = GRP_STYLE)
+i_tc_vbos_bear = input.color(color.white,                 "bear text",     inline = "vb2",  group = GRP_STYLE)
+i_sz_vbos      = input.string("normal", "size", options = ["tiny", "small", "normal", "large"], inline = "vb2", group = GRP_STYLE)
+i_c_vwma_chart = input.color(color.new(color.orange,  0), "VWMA chart",    inline = "vw",   group = GRP_STYLE)
+i_c_vwma_htf   = input.color(color.new(color.blue,    0), "HTF",           inline = "vw",   group = GRP_STYLE)
+i_c_base_up    = input.color(color.new(color.green,   0), "Baseline up",   inline = "bl",   group = GRP_STYLE)
+i_c_base_dn    = input.color(color.new(color.red,     0), "down",          inline = "bl",   group = GRP_STYLE)
+i_c_ce_long    = input.color(color.new(color.lime,    0), "CE long",       inline = "ce",   group = GRP_STYLE)
+i_c_ce_short   = input.color(color.new(color.fuchsia, 0), "short",         inline = "ce",   group = GRP_STYLE)
+
+// ============================================================================
+// SECTION 1 — HELPERS
+// ============================================================================
+
+_lineStyle(string s) =>
+    s == "dotted" ? line.style_dotted : s == "dashed" ? line.style_dashed : line.style_solid
+
+_labelSize(string s) =>
+    s == "tiny" ? size.tiny : s == "large" ? size.large : s == "small" ? size.small : size.normal
+
+// True when `level` falls within `band` of any value already stored in `arr`.
+// Used to cluster equal highs/lows into one liquidity level. Breaks on the
+// first hit rather than scanning the whole pool.
+_isDupLevel(arr, level, band) =>
+    bool found = false
+    int sz = array.size(arr)
+    if sz > 0
+        for i = 0 to sz - 1
+            if math.abs(level - array.get(arr, i)) <= band
+                found := true
+                break
+    found
+
+// ============================================================================
+// EFFECTIVE FEATURE FLAGS — module master × individual toggle
+// Display toggles gate DRAWING ONLY. The underlying engines keep running so
+// that cross-module readers (DOL, validated BOS, the HUD) stay correct when a
+// module's visuals are switched off. This is a deliberate fix: in the source
+// script the structure state machine lived inside its own display `if`, so
+// hiding the lines also froze the bias it was tracking.
+// ============================================================================
+bool eff_show_int_str = i_rs_enable  and i_show_int_struct
+bool eff_show_sw_str  = i_rs_enable  and i_show_sw_struct
+bool eff_show_eqhl    = i_rs_enable  and i_show_eqhl
+bool eff_show_mss_lbl = i_rs_enable  and i_show_mss_lbl
+bool eff_show_vbos    = i_rs_enable  and i_show_vbos
+bool eff_show_bsl     = i_liq_enable and i_show_bsl
+bool eff_show_ssl     = i_liq_enable and i_show_ssl
+bool eff_show_liq_lbl = i_liq_enable and i_show_liq_lbl
+bool eff_show_sweep   = i_liq_enable and i_show_sweep
+bool eff_show_ftc     = i_liq_enable and i_show_ftc
+bool eff_show_dol     = i_liq_enable and i_show_dol
+
+// Current-week gate. The source computed this by subtracting days from
+// dayofmonth() inside timestamp(), which relies on negative-day normalisation;
+// this walks back in milliseconds from local midnight instead.
+int  _MS_DAY       = 86400000
+int  _dow          = dayofweek(timenow, i_tz)
+int  _days_back    = _dow == dayofweek.sunday ? 6 : _dow - dayofweek.monday
+int  _local_midnight = timestamp(i_tz, year(timenow, i_tz), month(timenow, i_tz), dayofmonth(timenow, i_tz), 0, 0, 0)
+int  _week_start   = _local_midnight - _days_back * _MS_DAY
+bool this_week     = i_show_history or time >= _week_start
+
+// ============================================================================
+// SECTION 3 — VWMA REGIME  (chart 200 + timeframe-locked 200)
+// ============================================================================
+// ta.vwma returns na on instruments that publish no volume (most FX, many
+// indices and CFDs), which in the source silently blanked both plots and the
+// filter. Both branches are computed every bar and only then selected — a ta.*
+// call reached through a lazily-evaluated ternary skips bars and comes out
+// wrong.
+bool hasVolume = ta.cum(nz(volume)) > 0
+
+f_vwma(simple int len) =>
+    float v = ta.vwma(close, len)
+    float e = ta.ema(close, len)
+    hasVolume ? v : e
+
+float vwma_chart = f_vwma(i_vw_reg_len)
+float vwma_calc  = f_vwma(i_vw_htf_len)
+
+// Both variants are requested unconditionally; the non-repainting form reads
+// the last CLOSED higher-timeframe bar, so history and realtime agree.
+float htf_rt = request.security(syminfo.tickerid, i_vw_htf_tf, vwma_calc,      gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+float htf_nr = request.security(syminfo.tickerid, i_vw_htf_tf, vwma_calc[1],   gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+float vwma_htf = i_vw_nonrepaint ? htf_nr : htf_rt
+
+bool htfTooLow = timeframe.in_seconds(i_vw_htf_tf) < timeframe.in_seconds(timeframe.period)
+
+bool above_chart = not na(vwma_chart) and close > vwma_chart
+bool above_htf   = not na(vwma_htf)   and close > vwma_htf
+
+bool regimeUp = switch i_vw_filter
+    "Off"               => true
+    "Chart VWMA only"   => above_chart
+    "HTF VWMA only"     => above_htf
+    "Either VWMA"       => above_chart or above_htf
+    => above_chart and above_htf
+
+bool regimeDn = switch i_vw_filter
+    "Off"               => true
+    "Chart VWMA only"   => not above_chart
+    "HTF VWMA only"     => not above_htf
+    "Either VWMA"       => not above_chart or not above_htf
+    => not above_chart and not above_htf
+
+plot(i_vw_enable ? vwma_htf   : na, "HTF VWMA",   color = i_c_vwma_htf,   linewidth = 2)
+plot(i_vw_enable ? vwma_chart : na, "Chart VWMA", color = i_c_vwma_chart, linewidth = 2)
+
+// ============================================================================
+// SECTION 4 — BASELINE  (Ehlers Super Smoother / TMA / EMA)
+// ============================================================================
+
+// Ehlers 2-pole Super Smoother.
+f_superSmoother(float src, simple int len) =>
+    float a1 = math.exp(-1.414 * math.pi / len)
+    float b1 = 2.0 * a1 * math.cos(1.414 * math.pi / len)
+    float c2 = b1
+    float c3 = -a1 * a1
+    float c1 = 1.0 - c2 - c3
+    float ss = na
+    ss := c1 * (src + nz(src[1], src)) * 0.5 + c2 * nz(ss[1], src) + c3 * nz(ss[2], src)
+    ss
+
+// Triangular MA. The half-lengths must be divided as floats: `len / 2` on two
+// ints truncates before ceil() ever runs, which made every odd length behave
+// as the even length below it.
+f_tma(float src, simple int len) =>
+    h1 = math.ceil(len / 2.0)
+    h2 = math.floor(len / 2.0) + 1
+    ta.sma(ta.sma(src, h1), h2)
+
+float base_ss  = f_superSmoother(i_bl_src, i_bl_len)
+float base_tma = f_tma(i_bl_src, i_bl_len)
+float base_ema = ta.ema(i_bl_src, i_bl_len)
+float baseline = i_bl_type == "Super Smoother" ? base_ss : i_bl_type == "Triangular MA" ? base_tma : base_ema
+bool  baseRising = baseline > baseline[1]
+
+plot(i_bl_enable ? baseline : na, "Baseline", color = baseRising ? i_c_base_up : i_c_base_dn, linewidth = 2)
+
+// ============================================================================
+// SECTION 5 — CHANDELIER EXIT
+// ============================================================================
+float ce_atr  = ta.atr(i_ce_atr_len)
+float ce_hi   = i_ce_useclose ? ta.highest(close, i_ce_len) : ta.highest(high, i_ce_len)
+float ce_lo   = i_ce_useclose ? ta.lowest(close, i_ce_len)  : ta.lowest(low,  i_ce_len)
+float longRaw  = ce_hi - i_ce_mult * ce_atr
+float shortRaw = ce_lo + i_ce_mult * ce_atr
+
+var float longStop  = na
+var float shortStop = na
+var int   ce_dir    = 1
+
+// Seed the ratchet with the raw level on the first bar. Comparing against a
+// bare longStop[1] leaves it na until history exists, so the ratchet never
+// engages on the left edge of the chart.
+float longPrev  = nz(longStop[1],  longRaw)
+float shortPrev = nz(shortStop[1], shortRaw)
+
+longStop  := close[1] > longPrev  ? math.max(longRaw,  longPrev)  : longRaw
+shortStop := close[1] < shortPrev ? math.min(shortRaw, shortPrev) : shortRaw
+ce_dir    := close > shortPrev ? 1 : close < longPrev ? -1 : ce_dir
+
+bool ce_flip_up = ce_dir == 1 and ce_dir[1] == -1
+bool ce_flip_dn = ce_dir == -1 and ce_dir[1] == 1
+
+// Two series with na on the inactive side. A single always-valued series makes
+// style_linebr a no-op, so every flip drew a vertical connector across the pane.
+plot(i_ce_enable and ce_dir == 1  ? longStop  : na, "CE Long Stop",  color = i_c_ce_long,  style = plot.style_linebr, linewidth = 2)
+plot(i_ce_enable and ce_dir == -1 ? shortStop : na, "CE Short Stop", color = i_c_ce_short, style = plot.style_linebr, linewidth = 2)
+plotshape(i_ce_enable and i_show_flips and ce_flip_up, "CE Flip Up",   shape.circle, location.belowbar, color.new(color.lime, 0),    size = size.tiny)
+plotshape(i_ce_enable and i_show_flips and ce_flip_dn, "CE Flip Down", shape.circle, location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+
+// ============================================================================
+// SECTION 6 — CORE PIVOTS  (shared substrate for structure and liquidity)
+// ============================================================================
+float atr = ta.atr(i_atr_len)
+
+// Liquidity-tier pivots
+float ph = ta.pivothigh(high, i_swing_len, i_swing_len)
+float pl = ta.pivotlow(low,   i_swing_len, i_swing_len)
+
+// Structure-tier pivots. The source hard-coded the 3-candle rule and left its
+// lookback input wired to nothing; using pivothigh/pivotlow makes the input
+// real, and reduces to the identical 3-candle rule at the default of 1.
+float sth_price = ta.pivothigh(high, i_sth_len, i_sth_len)
+float stl_price = ta.pivotlow(low,   i_sth_len, i_sth_len)
+float ith_price = ta.pivothigh(high, i_ith_len, i_ith_len)
+float itl_price = ta.pivotlow(low,   i_ith_len, i_ith_len)
+
+// ============================================================================
+// SECTION 7 — MARKET STRUCTURE SHIFT (MSS)
+// ============================================================================
+// A break is a body close beyond the last confirmed swing pivot, held for
+// i_mss_confirm consecutive closes.
+var float last_sh        = na
+var float last_sl        = na
+var int   bull_bos_count = 0
+var int   bear_bos_count = 0
+
+// Resetting the counter on each new pivot is what lets a second break fire.
+// Without it the count runs away after the first break and never returns to
+// the confirmation threshold, so every subsequent MSS is silently swallowed.
+if not na(ph)
+    last_sh        := ph
+    bull_bos_count := 0
+if not na(pl)
+    last_sl        := pl
+    bear_bos_count := 0
+
+bool bull_bos = not na(last_sh) and close > last_sh
+bool bear_bos = not na(last_sl) and close < last_sl
+
+bull_bos_count := bull_bos ? bull_bos_count + 1 : 0
+bear_bos_count := bear_bos ? bear_bos_count + 1 : 0
+
+bool mss_bullish = bull_bos_count == i_mss_confirm
+bool mss_bearish = bear_bos_count == i_mss_confirm
+
+// CHoCH = break against the prevailing bias (reversal).
+// BOS   = break with the prevailing bias (continuation).
+var int swing_bias = 0
+bool mss_bull_choch = mss_bullish and swing_bias == -1
+bool mss_bear_choch = mss_bearish and swing_bias ==  1
+if mss_bullish
+    swing_bias := 1
+if mss_bearish
+    swing_bias := -1
+
+// ============================================================================
+// SECTION 8 — M2: LIQUIDITY POOLS  (BSL / SSL)
+// ============================================================================
+// BSL rests ABOVE swing highs — the buy stops of short sellers.
+// SSL rests BELOW swing lows  — the sell stops of long holders.
+// A level is consumed the moment a wick trades through it: a sweep is a wick
+// event, not a close event. Whether the candle then closes back inside is what
+// separates a stop hunt (FTC) from an expansion.
+
+var array<float> bsl_levels = array.new_float()
+var array<line>  bsl_lines  = array.new<line>()
+var array<float> ssl_levels = array.new_float()
+var array<line>  ssl_lines  = array.new<line>()
+
+float eq_band = close * i_liq_eq_tol / 100.0
+
+if not na(ph) and not _isDupLevel(bsl_levels, ph, eq_band)
+    array.push(bsl_levels, ph)
+    array.push(bsl_lines, eff_show_bsl and this_week ? line.new(bar_index - i_swing_len, ph, bar_index - i_swing_len + i_liq_extend, ph, color = i_c_bsl, style = _lineStyle(i_s_bsl), width = i_w_bsl) : na)
+
+if not na(pl) and not _isDupLevel(ssl_levels, pl, eq_band)
+    array.push(ssl_levels, pl)
+    array.push(ssl_lines, eff_show_ssl and this_week ? line.new(bar_index - i_swing_len, pl, bar_index - i_swing_len + i_liq_extend, pl, color = i_c_ssl, style = _lineStyle(i_s_ssl), width = i_w_ssl) : na)
+
+bool  bsl_swept       = false
+bool  ssl_swept       = false
+float bsl_swept_price = na
+float ssl_swept_price = na
+
+// Reverse iteration so removals do not shift indices out from under the loop.
+// When several levels go in one bar the reported price is the DEEPEST sweep —
+// the highest BSL taken, the lowest SSL taken — because that is the level the
+// failed-to-close test has to be measured against. The source kept whichever
+// level happened to be scanned last, which was effectively arbitrary.
+if array.size(bsl_levels) > 0
+    int bi = array.size(bsl_levels) - 1
+    while bi >= 0
+        float lvl = array.get(bsl_levels, bi)
+        if high > lvl
+            bsl_swept       := true
+            bsl_swept_price := na(bsl_swept_price) ? lvl : math.max(bsl_swept_price, lvl)
+            line.delete(array.get(bsl_lines, bi))
+            array.remove(bsl_levels, bi)
+            array.remove(bsl_lines, bi)
+        bi -= 1
+
+if array.size(ssl_levels) > 0
+    int bi = array.size(ssl_levels) - 1
+    while bi >= 0
+        float lvl = array.get(ssl_levels, bi)
+        if low < lvl
+            ssl_swept       := true
+            ssl_swept_price := na(ssl_swept_price) ? lvl : math.min(ssl_swept_price, lvl)
+            line.delete(array.get(ssl_lines, bi))
+            array.remove(ssl_levels, bi)
+            array.remove(ssl_lines, bi)
+        bi -= 1
+
+bool bsl_swept_flat = bsl_swept
+bool ssl_swept_flat = ssl_swept
+
+// FTC — the wick took the level but the body closed back inside the range.
+bool bsl_ftc = bsl_swept and not na(bsl_swept_price) and close < bsl_swept_price
+bool ssl_ftc = ssl_swept and not na(ssl_swept_price) and close > ssl_swept_price
+
+// Trim the oldest unswept levels once the pool is full.
+if array.size(bsl_levels) > i_liq_max
+    line.delete(array.shift(bsl_lines))
+    array.shift(bsl_levels)
+if array.size(ssl_levels) > i_liq_max
+    line.delete(array.shift(ssl_lines))
+    array.shift(ssl_levels)
+
+// Nearest relevant level in each direction — the lowest BSL above price and
+// the highest SSL below it, not the absolute extremes of the pool.
+float nearest_bsl = na
+if array.size(bsl_levels) > 0
+    for i = 0 to array.size(bsl_levels) - 1
+        float lvl = array.get(bsl_levels, i)
+        if lvl > close
+            nearest_bsl := na(nearest_bsl) ? lvl : math.min(nearest_bsl, lvl)
+
+float nearest_ssl = na
+if array.size(ssl_levels) > 0
+    for i = 0 to array.size(ssl_levels) - 1
+        float lvl = array.get(ssl_levels, i)
+        if lvl < close
+            nearest_ssl := na(nearest_ssl) ? lvl : math.max(nearest_ssl, lvl)
+
+bool near_bsl       = not na(nearest_bsl) and math.abs(high - nearest_bsl) <= atr * i_liq_prox
+bool near_ssl       = not na(nearest_ssl) and math.abs(low  - nearest_ssl) <= atr * i_liq_prox
+bool near_liquidity = near_bsl or near_ssl
+
+bool mss_bull_liq = mss_bullish and near_liquidity
+bool mss_bear_liq = mss_bearish and near_liquidity
+
+// ============================================================================
+// SECTION 9 — M1: LIVE STRUCTURE LINES  (internal + swing BOS/CHoCH, EQH/EQL)
+// ============================================================================
+// Solid line  = BOS   (body close beyond the level, with the prevailing bias)
+// Dashed line = CHoCH (body close beyond the level, against it)
+// Dotted line = level still unbroken, extending right
+//
+// The state machine below runs whether or not the drawings are enabled. Only
+// line.new / label.new are gated on the display toggles.
+
+var float int_sh     = na
+var int   int_sh_bar = na
+var float int_sl     = na
+var int   int_sl_bar = na
+var int   int_bias   = 0
+var line  int_sh_ext = na
+var line  int_sl_ext = na
+
+var float sw_sh      = na
+var int   sw_sh_bar  = na
+var float sw_sl      = na
+var int   sw_sl_bar  = na
+var int   sw_bias    = 0
+var line  sw_sh_ext  = na
+var line  sw_sl_ext  = na
+
+var float prev_sth_p = na
+var int   prev_sth_b = na
+var float prev_stl_p = na
+var int   prev_stl_b = na
+
+var array<line>  int_lines  = array.new<line>()
+var array<label> int_labels = array.new<label>()
+var array<line>  sw_lines   = array.new<line>()
+var array<label> sw_labels  = array.new<label>()
+var array<line>  eq_lines   = array.new<line>()
+var array<label> eq_labels  = array.new<label>()
+
+var string last_break_txt = "—"
+
+// ── Internal tier — test breaks BEFORE adopting this bar's new pivots ────────
+bool int_bull_brk = not na(int_sh) and close > int_sh
+bool int_bear_brk = not na(int_sl) and close < int_sl
+
+if int_bull_brk
+    bool _choch = int_bias < 0
+    if eff_show_int_str and this_week
+        line  _l  = line.new(int_sh_bar, int_sh, bar_index, int_sh, color = i_c_int_bull, style = _choch ? line.style_dashed : line.style_solid, width = 2)
+        label _lb = label.new(int_sh_bar + (bar_index - int_sh_bar) / 2, int_sh, _choch ? "CHoCH" : "BOS", color = color.new(i_c_int_bull, 20), style = label.style_none, textcolor = i_c_int_bull, size = size.tiny)
+        array.push(int_lines, _l)
+        array.push(int_labels, _lb)
+        if array.size(int_lines) > i_struct_keep
+            line.delete(array.shift(int_lines))
+            label.delete(array.shift(int_labels))
+    last_break_txt := _choch ? "INT CHoCH ^" : "INT BOS ^"
+    line.delete(int_sh_ext)
+    int_sh_ext := na
+    int_sh     := na
+    int_bias   := 1
+
+if int_bear_brk
+    bool _choch = int_bias > 0
+    if eff_show_int_str and this_week
+        line  _l  = line.new(int_sl_bar, int_sl, bar_index, int_sl, color = i_c_int_bear, style = _choch ? line.style_dashed : line.style_solid, width = 2)
+        label _lb = label.new(int_sl_bar + (bar_index - int_sl_bar) / 2, int_sl, _choch ? "CHoCH" : "BOS", color = color.new(i_c_int_bear, 20), style = label.style_none, textcolor = i_c_int_bear, size = size.tiny)
+        array.push(int_lines, _l)
+        array.push(int_labels, _lb)
+        if array.size(int_lines) > i_struct_keep
+            line.delete(array.shift(int_lines))
+            label.delete(array.shift(int_labels))
+    last_break_txt := _choch ? "INT CHoCH v" : "INT BOS v"
+    line.delete(int_sl_ext)
+    int_sl_ext := na
+    int_sl     := na
+    int_bias   := -1
+
+if not na(sth_price)
+    line.delete(int_sh_ext)
+    int_sh     := sth_price
+    int_sh_bar := bar_index - i_sth_len
+    int_sh_ext := eff_show_int_str and this_week ? line.new(int_sh_bar, sth_price, bar_index + i_struct_ext, sth_price, color = color.new(i_c_int_bull, 55), style = line.style_dotted, width = 1) : na
+
+if not na(stl_price)
+    line.delete(int_sl_ext)
+    int_sl     := stl_price
+    int_sl_bar := bar_index - i_sth_len
+    int_sl_ext := eff_show_int_str and this_week ? line.new(int_sl_bar, stl_price, bar_index + i_struct_ext, stl_price, color = color.new(i_c_int_bear, 55), style = line.style_dotted, width = 1) : na
+
+// ── Swing tier ──────────────────────────────────────────────────────────────
+bool sw_bull_brk = not na(sw_sh) and close > sw_sh
+bool sw_bear_brk = not na(sw_sl) and close < sw_sl
+
+if sw_bull_brk
+    bool _choch = sw_bias < 0
+    if eff_show_sw_str and this_week
+        line  _l  = line.new(sw_sh_bar, sw_sh, bar_index, sw_sh, color = i_c_sw_bull, style = _choch ? line.style_dashed : line.style_solid, width = 2)
+        label _lb = label.new(sw_sh_bar + (bar_index - sw_sh_bar) / 2, sw_sh, _choch ? "CHoCH" : "BOS", color = color.new(i_c_sw_bull, 20), style = label.style_none, textcolor = i_c_sw_bull, size = size.small)
+        array.push(sw_lines, _l)
+        array.push(sw_labels, _lb)
+        if array.size(sw_lines) > i_struct_keep
+            line.delete(array.shift(sw_lines))
+            label.delete(array.shift(sw_labels))
+    last_break_txt := _choch ? "SW CHoCH ^" : "SW BOS ^"
+    line.delete(sw_sh_ext)
+    sw_sh_ext := na
+    sw_sh     := na
+    sw_bias   := 1
+
+if sw_bear_brk
+    bool _choch = sw_bias > 0
+    if eff_show_sw_str and this_week
+        line  _l  = line.new(sw_sl_bar, sw_sl, bar_index, sw_sl, color = i_c_sw_bear, style = _choch ? line.style_dashed : line.style_solid, width = 2)
+        label _lb = label.new(sw_sl_bar + (bar_index - sw_sl_bar) / 2, sw_sl, _choch ? "CHoCH" : "BOS", color = color.new(i_c_sw_bear, 20), style = label.style_none, textcolor = i_c_sw_bear, size = size.small)
+        array.push(sw_lines, _l)
+        array.push(sw_labels, _lb)
+        if array.size(sw_lines) > i_struct_keep
+            line.delete(array.shift(sw_lines))
+            label.delete(array.shift(sw_labels))
+    last_break_txt := _choch ? "SW CHoCH v" : "SW BOS v"
+    line.delete(sw_sl_ext)
+    sw_sl_ext := na
+    sw_sl     := na
+    sw_bias   := -1
+
+if not na(ith_price)
+    line.delete(sw_sh_ext)
+    sw_sh     := ith_price
+    sw_sh_bar := bar_index - i_ith_len
+    sw_sh_ext := eff_show_sw_str and this_week ? line.new(sw_sh_bar, ith_price, bar_index + i_struct_ext, ith_price, color = color.new(i_c_sw_bull, 55), style = line.style_dotted, width = 1) : na
+
+if not na(itl_price)
+    line.delete(sw_sl_ext)
+    sw_sl     := itl_price
+    sw_sl_bar := bar_index - i_ith_len
+    sw_sl_ext := eff_show_sw_str and this_week ? line.new(sw_sl_bar, itl_price, bar_index + i_struct_ext, itl_price, color = color.new(i_c_sw_bear, 55), style = line.style_dotted, width = 1) : na
+
+// ── EQH / EQL ───────────────────────────────────────────────────────────────
+if not na(sth_price)
+    if eff_show_eqhl and this_week and not na(prev_sth_p) and math.abs(sth_price - prev_sth_p) <= prev_sth_p * i_eqhl_tol / 100.0
+        line  _el = line.new(prev_sth_b, prev_sth_p, bar_index - i_sth_len, sth_price, color = i_c_eqh, style = line.style_dashed, width = 1)
+        label _eb = label.new(bar_index - i_sth_len, sth_price + atr * 0.3, "EQH", color = color.new(i_c_eqh, 100), style = label.style_none, textcolor = i_c_eqh, size = size.tiny, tooltip = "Equal Highs @ " + str.tostring(sth_price, format.mintick) + "\nTwo consecutive short-term highs within " + str.tostring(i_eqhl_tol, "#.##") + "% of each other.\nDouble-top liquidity pool — buy stops cluster above both highs.\nEngineered level: price typically sweeps both before reversing.")
+        array.push(eq_lines, _el)
+        array.push(eq_labels, _eb)
+        if array.size(eq_lines) > i_struct_keep
+            line.delete(array.shift(eq_lines))
+            label.delete(array.shift(eq_labels))
+    prev_sth_p := sth_price
+    prev_sth_b := bar_index - i_sth_len
+
+if not na(stl_price)
+    if eff_show_eqhl and this_week and not na(prev_stl_p) and math.abs(stl_price - prev_stl_p) <= prev_stl_p * i_eqhl_tol / 100.0
+        line  _el = line.new(prev_stl_b, prev_stl_p, bar_index - i_sth_len, stl_price, color = i_c_eql, style = line.style_dashed, width = 1)
+        label _eb = label.new(bar_index - i_sth_len, stl_price - atr * 0.3, "EQL", color = color.new(i_c_eql, 100), style = label.style_none, textcolor = i_c_eql, size = size.tiny, tooltip = "Equal Lows @ " + str.tostring(stl_price, format.mintick) + "\nTwo consecutive short-term lows within " + str.tostring(i_eqhl_tol, "#.##") + "% of each other.\nDouble-bottom liquidity pool — sell stops cluster below both lows.\nEngineered level: price typically sweeps both before reversing.")
+        array.push(eq_lines, _el)
+        array.push(eq_labels, _eb)
+        if array.size(eq_lines) > i_struct_keep
+            line.delete(array.shift(eq_lines))
+            label.delete(array.shift(eq_labels))
+    prev_stl_p := stl_price
+    prev_stl_b := bar_index - i_sth_len
+
+// Keep unbroken-level lines reaching the right edge.
+if barstate.islast
+    if not na(int_sh_ext) and not na(int_sh)
+        line.set_x2(int_sh_ext, bar_index + i_struct_ext)
+    if not na(int_sl_ext) and not na(int_sl)
+        line.set_x2(int_sl_ext, bar_index + i_struct_ext)
+    if not na(sw_sh_ext) and not na(sw_sh)
+        line.set_x2(sw_sh_ext, bar_index + i_struct_ext)
+    if not na(sw_sl_ext) and not na(sw_sl)
+        line.set_x2(sw_sl_ext, bar_index + i_struct_ext)
+
+// ============================================================================
+// SECTION 10 — DRAW ON LIQUIDITY  and  VALIDATED BOS   (both rewired)
+// ============================================================================
+// DOL originally required "internal fuel" from an Order Block or an unmitigated
+// FVG — Step 5, scrapped. Structure bias is the closest surviving proxy for the
+// same idea: the market has committed a direction internally and there is an
+// untouched external pool in front of it.
+bool struct_bull = int_bias == 1 or sw_bias == 1
+bool struct_bear = int_bias == -1 or sw_bias == -1
+bool dol_gate_up = not (i_vw_enable and i_dol_regime) or regimeUp
+bool dol_gate_dn = not (i_vw_enable and i_dol_regime) or regimeDn
+
+bool dol_bsl = not na(nearest_bsl) and struct_bull and dol_gate_up
+bool dol_ssl = not na(nearest_ssl) and struct_bear and dol_gate_dn
+
+// Validated BOS originally required a prior visit to the Operating Range
+// discount/premium sector — Step 6, scrapped. Regime agreement is the
+// replacement: a break that the volume-weighted trend and the trailing stop
+// both already agree with.
+bool reg_ok_long  = not i_vw_enable or regimeUp
+bool reg_ok_short = not i_vw_enable or regimeDn
+bool ce_ok_long   = not i_ce_enable or ce_dir == 1
+bool ce_ok_short  = not i_ce_enable or ce_dir == -1
+bool has_validator = i_vw_enable or i_ce_enable
+
+bool mss_bull_validated = mss_bullish and has_validator and reg_ok_long  and ce_ok_long
+bool mss_bear_validated = mss_bearish and has_validator and reg_ok_short and ce_ok_short
+
+// ============================================================================
+// SECTION 12 — M6: PIVOT POINTS PRO
+// ============================================================================
+// Levels are stored flat (one array of graphics plus one array of row lengths)
+// rather than as nested arrays, which Pine does not support.
+//
+// The source called runtime.error() when there was not enough data to build a
+// pivot row. In a merged script that would take down every other module over a
+// problem confined to one of them, so the failure is reported in the HUD
+// status row instead and everything else keeps drawing.
+
+type ppGraphic
+    line  ln
+    label lb
+
+method wipe(ppGraphic g) =>
+    g.ln.delete()
+    g.lb.delete()
+
+type ppLevelCfg
+    string name
+    color  col
+    bool   show
+
+var array<ppGraphic> pp_graphics = array.new<ppGraphic>()
+var array<int>       pp_rowlens  = array.new_int()
+var string           pp_status   = "ok"
+var int              pp_firstbar = time
+
+string pp_auto = switch
+    timeframe.isintraday => timeframe.multiplier <= 15 ? "1D" : "1W"
+    timeframe.isdaily    => "1M"
+    => "12M"
+
+string pp_tf = switch i_pp_anchor
+    "Auto"      => pp_auto
+    "Daily"     => "1D"
+    "Weekly"    => "1W"
+    "Monthly"   => "1M"
+    "Quarterly" => "3M"
+    => "12M"
+
+int pp_yearmult = switch i_pp_anchor
+    "Biyearly"       => 2
+    "Triyearly"      => 3
+    "Quinquennially" => 5
+    "Decennially"    => 10
+    => 1
+
+bool pp_local_chg = timeframe.change(pp_tf) and year % pp_yearmult == 0
+bool pp_sec_chg   = timeframe.change(timeframe.period) and year % pp_yearmult == 0
+
+ppChgCounter(bool cond) =>
+    var int c = 0
+    if cond and bar_index > 0
+        c += 1
+    c
+
+array<float> pp_local = ta.pivot_point_levels(i_pp_type, pp_local_chg)
+array<float> pp_secin = ta.pivot_point_levels(i_pp_type, pp_sec_chg)
+[pp_secout, pp_seccnt] = request.security(syminfo.tickerid, pp_tf, [pp_secin, ppChgCounter(pp_sec_chg)], lookahead = barmerge.lookahead_on)
+array<float> pp_levels = i_pp_daily ? pp_secout : pp_local
+
+// Order must match ta.pivot_point_levels: P, R1, S1, R2, S2, …
+var array<ppLevelCfg> pp_cfg = array.from(ppLevelCfg.new(" P", i_pp_c_p, i_pp_s_p), ppLevelCfg.new("R1", i_pp_c_r1, i_pp_s_r1), ppLevelCfg.new("S1", i_pp_c_s1, i_pp_s_s1), ppLevelCfg.new("R2", i_pp_c_r2, i_pp_s_r2), ppLevelCfg.new("S2", i_pp_c_s2, i_pp_s_s2), ppLevelCfg.new("R3", i_pp_c_r3, i_pp_s_r3), ppLevelCfg.new("S3", i_pp_c_s3, i_pp_s_s3), ppLevelCfg.new("R4", i_pp_c_r4, i_pp_s_r4), ppLevelCfg.new("S4", i_pp_c_s4, i_pp_s_s4), ppLevelCfg.new("R5", i_pp_c_r5, i_pp_s_r5), ppLevelCfg.new("S5", i_pp_c_s5, i_pp_s_s5))
+
+// Close off the previously drawn row at `endTime`.
+ppAffixLast(int endTime) =>
+    if array.size(pp_rowlens) > 0
+        int lastLen = array.get(pp_rowlens, array.size(pp_rowlens) - 1)
+        int startIx = array.size(pp_graphics) - lastLen
+        if lastLen > 0 and startIx >= 0
+            for i = 0 to lastLen - 1
+                ppGraphic g = array.get(pp_graphics, startIx + i)
+                g.ln.set_x2(endTime)
+                if i_pp_lblpos == "Right"
+                    g.lb.set_x(endTime)
+
+ppDrawRow(int startTime) =>
+    int added = 0
+    if not na(pp_levels)
+        int n = math.min(array.size(pp_levels), array.size(pp_cfg))
+        if n > 0
+            int endTime = startTime + timeframe.in_seconds(pp_tf) * 1000 * pp_yearmult
+            for i = 0 to n - 1
+                float y = array.get(pp_levels, i)
+                ppLevelCfg c = array.get(pp_cfg, i)
+                if not na(y) and c.show
+                    line  ln = line.new(startTime, y, endTime, y, xloc = xloc.bar_time, color = c.col, width = i_pp_width)
+                    label lb = label.new(x = i_pp_lblpos == "Left" ? startTime : endTime, y = y, text = (i_pp_labels ? c.name + " " : "") + (i_pp_prices ? "(" + str.tostring(y, format.mintick) + ")" : ""), style = i_pp_lblpos == "Left" ? label.style_label_right : label.style_label_left, textcolor = c.col, color = color.new(color.black, 100), xloc = xloc.bar_time)
+                    array.push(pp_graphics, ppGraphic.new(ln, lb))
+                    added += 1
+    array.push(pp_rowlens, added)
+    while array.size(pp_rowlens) > i_pp_back
+        int oldest = array.shift(pp_rowlens)
+        if oldest > 0
+            for j = 0 to oldest - 1
+                array.shift(pp_graphics).wipe()
+
+ppClearAll() =>
+    while array.size(pp_graphics) > 0
+        array.shift(pp_graphics).wipe()
+    while array.size(pp_rowlens) > 0
+        array.shift(pp_rowlens)
+
+var bool pp_prev_on = i_pp_enable
+if i_pp_enable != pp_prev_on
+    if not i_pp_enable
+        ppClearAll()
+    pp_prev_on := i_pp_enable
+
+bool pp_static_draw = (i_pp_daily and pp_seccnt != nz(pp_seccnt[1])) or (not i_pp_daily and pp_local_chg)
+
+if i_pp_enable
+    if pp_static_draw
+        ppAffixLast(time)
+        ppDrawRow(time)
+    if barstate.islastconfirmedhistory and array.size(pp_rowlens) == 0
+        if i_pp_daily and not na(pp_secout) and pp_seccnt > 0
+            ppDrawRow(pp_firstbar)
+        else
+            pp_status := i_pp_daily ? "pivots: no HTF data" : "pivots: chart history too short"
+
+// ============================================================================
+// SECTION 13 — M7: PSYCHOLOGICAL LEVELS
+// ============================================================================
+// log10 of a non-positive price is undefined, so every helper guards its input
+// rather than propagating a runtime error on inverted or zero-priced series.
+
+f_nLeftDigits(float num, float n, float increment) =>
+    float out = na
+    if not na(num) and num > 0
+        float n2   = num < 1.0 ? n + 1 : n
+        float unit = math.pow(10, int(math.log10(num)) - int(n2) + 1)
+        int   nb   = int(num / unit)
+        out := nb * unit + unit * increment
+    out
+
+f_nthLeftDigit(float num, float n) =>
+    float out = na
+    if not na(num) and num > 0
+        float n2   = num < 1.0 ? n + 1 : n
+        float unit = math.pow(10, int(math.log10(num)) - int(n2) + 1)
+        int   nb   = int(num / unit)
+        out := math.abs(nb) % 10
+    out
+
+f_psyColor(float level, float n, color base) =>
+    float d = f_nthLeftDigit(level, n)
+    int   t = not i_psy_zipf or na(d) ? i_psy_fixed : int(d * 10)
+    color.new(base, t)
+
+float psy_a_strong = ta.sma(f_nLeftDigits(i_psy_src, 1, i_psy_above), i_psy_smooth)
+float psy_a_med    = ta.sma(f_nLeftDigits(i_psy_src, 2, i_psy_above), i_psy_smooth)
+float psy_a_weak   = ta.sma(f_nLeftDigits(i_psy_src, 3, i_psy_above), i_psy_smooth)
+float psy_h_strong = ta.sma(f_nLeftDigits(i_psy_src, 1, i_psy_half),  i_psy_smooth)
+float psy_h_med    = ta.sma(f_nLeftDigits(i_psy_src, 2, i_psy_half),  i_psy_smooth)
+float psy_h_weak   = ta.sma(f_nLeftDigits(i_psy_src, 3, i_psy_half),  i_psy_smooth)
+float psy_b_strong = ta.sma(f_nLeftDigits(i_psy_src, 1, i_psy_below), i_psy_smooth)
+float psy_b_med    = ta.sma(f_nLeftDigits(i_psy_src, 2, i_psy_below), i_psy_smooth)
+float psy_b_weak   = ta.sma(f_nLeftDigits(i_psy_src, 3, i_psy_below), i_psy_smooth)
+
+plot(i_psy_enable ? psy_a_weak   : na, "Psy weak ABOVE",        color = f_psyColor(psy_a_weak,   3, i_psy_c3a), linewidth = 1, style = plot.style_circles, display = display.none)
+plot(i_psy_enable ? psy_h_weak   : na, "Psy weak half ABOVE",   color = f_psyColor(psy_h_weak,   3, i_psy_c3h), linewidth = 1, style = plot.style_circles, display = display.none)
+plot(i_psy_enable ? psy_b_weak   : na, "Psy weak BELOW",        color = f_psyColor(psy_b_weak,   3, i_psy_c3b), linewidth = 1, style = plot.style_circles, display = display.none)
+plot(i_psy_enable ? psy_a_med    : na, "Psy medium ABOVE",      color = f_psyColor(psy_a_med,    2, i_psy_c2a), linewidth = 2, style = plot.style_circles)
+plot(i_psy_enable ? psy_h_med    : na, "Psy medium half ABOVE", color = f_psyColor(psy_h_med,    2, i_psy_c2h), linewidth = 2, style = plot.style_circles)
+plot(i_psy_enable ? psy_b_med    : na, "Psy medium BELOW",      color = f_psyColor(psy_b_med,    2, i_psy_c2b), linewidth = 2, style = plot.style_circles)
+plot(i_psy_enable ? psy_a_strong : na, "Psy strong ABOVE",      color = f_psyColor(psy_a_strong, 1, i_psy_c1a), linewidth = 3, style = plot.style_circles)
+plot(i_psy_enable ? psy_h_strong : na, "Psy strong half ABOVE", color = f_psyColor(psy_h_strong, 1, i_psy_c1h), linewidth = 3, style = plot.style_circles)
+plot(i_psy_enable ? psy_b_strong : na, "Psy strong BELOW",      color = f_psyColor(psy_b_strong, 1, i_psy_c1b), linewidth = 3, style = plot.style_circles)
+
+// ============================================================================
+// SECTION 14 — LABEL RENDERING
+// ============================================================================
+// Labels stack outward from the candle so several events on one bar stay
+// readable: bearish labels climb from the high, bullish labels descend from
+// the low. The accumulators are plain (non-var) floats, so they reset every bar
+// automatically. Step is 2x ATR so labels clear each other at any zoom.
+float _step = atr * 2.0
+float _yd   = low  - atr * 0.6
+float _yu   = high + atr * 0.6
+
+// ── MSS ─────────────────────────────────────────────────────────────────────
+if eff_show_mss_lbl and mss_bull_liq and this_week
+    label.new(bar_index, _yd, mss_bull_choch ? "CHoCH ^" : "BOS ^", color = i_c_mss_bull, style = label.style_label_up, textcolor = i_tc_mss, size = _labelSize(i_sz_mss), tooltip = mss_bull_choch ? "CHoCH — Change of Character (Bullish)\nBreak fired while the prevailing bias was BEARISH. This is the reversal read.\nPrice closed above " + str.tostring(last_sh, format.mintick) + " at liquidity." : "BOS — Break of Structure (Bullish)\nContinuation break inside an existing bullish bias.\nPrice closed above " + str.tostring(last_sh, format.mintick) + ". The leg is extending, not turning.")
+    _yd -= _step
+if eff_show_mss_lbl and mss_bear_liq and this_week
+    label.new(bar_index, _yu, mss_bear_choch ? "CHoCH v" : "BOS v", color = i_c_mss_bear, style = label.style_label_down, textcolor = i_tc_mss, size = _labelSize(i_sz_mss), tooltip = mss_bear_choch ? "CHoCH — Change of Character (Bearish)\nBreak fired while the prevailing bias was BULLISH. This is the reversal read.\nPrice closed below " + str.tostring(last_sl, format.mintick) + " at liquidity." : "BOS — Break of Structure (Bearish)\nContinuation break inside an existing bearish bias.\nPrice closed below " + str.tostring(last_sl, format.mintick) + ". The leg is extending, not turning.")
+    _yu += _step
+
+// ── Liquidity level tags ────────────────────────────────────────────────────
+if eff_show_liq_lbl and eff_show_bsl and not na(ph) and this_week
+    label.new(bar_index - i_swing_len, ph, "BSL", color = i_c_bsl, style = label.style_label_down, textcolor = color.white, size = size.small, tooltip = "Buy-Side Liquidity @ " + str.tostring(ph, format.mintick) + "\nBuy stops of short sellers rest above this swing high.\nUnswept — still active as a draw on liquidity.")
+if eff_show_liq_lbl and eff_show_ssl and not na(pl) and this_week
+    label.new(bar_index - i_swing_len, pl, "SSL", color = i_c_ssl, style = label.style_label_up, textcolor = color.white, size = size.small, tooltip = "Sell-Side Liquidity @ " + str.tostring(pl, format.mintick) + "\nSell stops of long holders rest below this swing low.\nUnswept — still active as a draw on liquidity.")
+
+// ── Sweeps ──────────────────────────────────────────────────────────────────
+if eff_show_sweep and bsl_swept_flat and this_week
+    label.new(bar_index, _yu, "BSL SWEPT", color = i_c_sweep_bsl, style = label.style_label_down, textcolor = i_tc_sweep, size = _labelSize(i_sz_sweep), tooltip = "Buy-Side Liquidity taken @ " + str.tostring(bsl_swept_price, format.mintick) + ".\nBuy stops above the swing high are now filled. Whoever bought them is holding the position.\nWatch what the candle does next: a close back below is a failed auction (see FTC); a close above is expansion.")
+    _yu += _step
+if eff_show_sweep and ssl_swept_flat and this_week
+    label.new(bar_index, _yd, "SSL SWEPT", color = i_c_sweep_ssl, style = label.style_label_up, textcolor = i_tc_sweep, size = _labelSize(i_sz_sweep), tooltip = "Sell-Side Liquidity taken @ " + str.tostring(ssl_swept_price, format.mintick) + ".\nSell stops below the swing low are now filled.\nWatch what the candle does next: a close back above is a failed auction (see FTC); a close below is expansion.")
+    _yd -= _step
+
+// ── FTC ─────────────────────────────────────────────────────────────────────
+if eff_show_ftc and bsl_ftc and this_week
+    label.new(bar_index, _yu, "FTC BEAR", color = i_c_ftc_bear, style = label.style_label_down, textcolor = i_tc_ftc, size = _labelSize(i_sz_ftc), tooltip = "Failed to Close — Bearish\nThe wick swept BSL @ " + str.tostring(bsl_swept_price, format.mintick) + " but the candle CLOSED back below it.\nBuyers could not hold above the level. The auction above failed.")
+    _yu += _step
+if eff_show_ftc and ssl_ftc and this_week
+    label.new(bar_index, _yd, "FTC BULL", color = i_c_ftc_bull, style = label.style_label_up, textcolor = i_tc_ftc, size = _labelSize(i_sz_ftc), tooltip = "Failed to Close — Bullish\nThe wick swept SSL @ " + str.tostring(ssl_swept_price, format.mintick) + " but the candle CLOSED back above it.\nSellers could not hold below the level. The auction below failed.")
+    _yd -= _step
+
+// ── DOL ─────────────────────────────────────────────────────────────────────
+if eff_show_dol and dol_bsl and not dol_bsl[1] and this_week
+    label.new(bar_index, _yu, "DOL: BSL ^", color = color.new(i_c_dol_bull, 100), style = label.style_none, textcolor = i_c_dol_bull, size = _labelSize(i_sz_dol), tooltip = "Draw on Liquidity — Buy Side\nStructure bias is bullish" + (i_vw_enable and i_dol_regime ? " and the VWMA regime agrees" : "") + ", with an unswept BSL above @ " + str.tostring(nearest_bsl, format.mintick) + ".\nThe nearest untouched pool in front of price sits above. That is the direction of least resistance until it is taken.")
+    _yu += _step
+if eff_show_dol and dol_ssl and not dol_ssl[1] and this_week
+    label.new(bar_index, _yd, "DOL: SSL v", color = color.new(i_c_dol_bear, 100), style = label.style_none, textcolor = i_c_dol_bear, size = _labelSize(i_sz_dol), tooltip = "Draw on Liquidity — Sell Side\nStructure bias is bearish" + (i_vw_enable and i_dol_regime ? " and the VWMA regime agrees" : "") + ", with an unswept SSL below @ " + str.tostring(nearest_ssl, format.mintick) + ".\nThe nearest untouched pool in front of price sits below. That is the direction of least resistance until it is taken.")
+    _yd -= _step
+
+// ── Validated BOS ───────────────────────────────────────────────────────────
+if eff_show_vbos and mss_bull_validated and this_week
+    label.new(bar_index, _yd, "VALID BOS ^", color = i_c_vbos_bull, style = label.style_label_up, textcolor = i_tc_vbos_bull, size = _labelSize(i_sz_vbos), tooltip = "Validated Bullish BOS\nA structural break that the regime already agreed with" + (i_vw_enable ? "\n  • VWMA regime: up" : "") + (i_ce_enable ? "\n  • Chandelier: long" : "") + "\nThis is a confluence filter, not a prediction — it removes breaks that fire against the prevailing trend, which are the ones most likely to fail.")
+    _yd -= _step
+if eff_show_vbos and mss_bear_validated and this_week
+    label.new(bar_index, _yu, "VALID BOS v", color = i_c_vbos_bear, style = label.style_label_down, textcolor = i_tc_vbos_bear, size = _labelSize(i_sz_vbos), tooltip = "Validated Bearish BOS\nA structural break that the regime already agreed with" + (i_vw_enable ? "\n  • VWMA regime: down" : "") + (i_ce_enable ? "\n  • Chandelier: short" : "") + "\nThis is a confluence filter, not a prediction — it removes breaks that fire against the prevailing trend, which are the ones most likely to fail.")
+    _yu += _step
+
+// ============================================================================
+// SECTION 15 — HUD
+// ============================================================================
+var table hud = table.new(i_hud_pos == "Top Left" ? position.top_left : i_hud_pos == "Top Center" ? position.top_center : i_hud_pos == "Top Right" ? position.top_right : i_hud_pos == "Middle Left" ? position.middle_left : i_hud_pos == "Middle Right" ? position.middle_right : i_hud_pos == "Bottom Left" ? position.bottom_left : i_hud_pos == "Bottom Center" ? position.bottom_center : position.bottom_right, 2, 16, bgcolor = color.new(color.black, 72), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+
+string hud_sz = i_hud_size == "Auto" ? size.auto : i_hud_size == "Tiny" ? size.tiny : i_hud_size == "Small" ? size.small : i_hud_size == "Normal" ? size.normal : size.large
+color  HDR_BG = color.new(color.gray, 55)
+color  LBL_TC = color.new(color.silver, 20)
+color  OFF_TC = color.new(color.gray, 40)
+
+_hdr(int r, string txt) =>
+    table.cell(hud, 0, r, txt, text_color = color.white, text_size = hud_sz, bgcolor = HDR_BG, text_halign = text.align_left)
+    table.cell(hud, 1, r, "",  text_color = color.white, text_size = hud_sz, bgcolor = HDR_BG)
+
+_row(int r, string lbl, string val, color vc) =>
+    table.cell(hud, 0, r, lbl, text_color = LBL_TC, text_size = hud_sz, text_halign = text.align_left)
+    table.cell(hud, 1, r, val, text_color = vc,     text_size = hud_sz, text_halign = text.align_right)
+
+if i_show_hud and barstate.islast
+    _hdr(0, "STRUCTURE")
+    _row(1, "Internal bias", int_bias == 1 ? "BULL" : int_bias == -1 ? "BEAR" : "—", int_bias == 1 ? color.new(color.lime, 10) : int_bias == -1 ? color.new(color.red, 10) : OFF_TC)
+    _row(2, "Swing bias",    sw_bias  == 1 ? "BULL" : sw_bias  == -1 ? "BEAR" : "—", sw_bias  == 1 ? color.new(color.lime, 10) : sw_bias  == -1 ? color.new(color.red, 10) : OFF_TC)
+    _row(3, "Last break",    last_break_txt, last_break_txt == "—" ? OFF_TC : color.new(color.silver, 10))
+
+    _hdr(4, "LIQUIDITY")
+    _row(5, "Levels", "BSL " + str.tostring(array.size(bsl_levels)) + "  /  SSL " + str.tostring(array.size(ssl_levels)), array.size(bsl_levels) + array.size(ssl_levels) > 0 ? color.new(color.silver, 10) : OFF_TC)
+    _row(6, "Nearest", near_bsl ? "BSL " + str.tostring(nearest_bsl, format.mintick) : near_ssl ? "SSL " + str.tostring(nearest_ssl, format.mintick) : not na(nearest_bsl) ? "BSL " + str.tostring(nearest_bsl, format.mintick) : not na(nearest_ssl) ? "SSL " + str.tostring(nearest_ssl, format.mintick) : "—", near_bsl ? color.aqua : near_ssl ? color.orange : OFF_TC)
+    _row(7, "FTC", bsl_ftc ? "BEAR FTC" : ssl_ftc ? "BULL FTC" : "—", bsl_ftc ? color.new(color.red, 10) : ssl_ftc ? color.new(color.lime, 10) : OFF_TC)
+    _row(8, "Draw on Liq", dol_bsl ? "→ BSL ^" : dol_ssl ? "→ SSL v" : "—", dol_bsl ? color.aqua : dol_ssl ? color.orange : OFF_TC)
+
+    _hdr(9, "REGIME")
+    _row(10, "Chart VWMA", not i_vw_enable ? "off" : above_chart ? "above" : "below", not i_vw_enable ? OFF_TC : above_chart ? color.lime : color.fuchsia)
+    _row(11, "HTF VWMA (" + i_vw_htf_tf + ")", not i_vw_enable ? "off" : above_htf ? "above" : "below", not i_vw_enable ? OFF_TC : above_htf ? color.lime : color.fuchsia)
+    _row(12, "Baseline", not i_bl_enable ? "off" : baseRising ? "rising" : "falling", not i_bl_enable ? OFF_TC : baseRising ? color.lime : color.fuchsia)
+    _row(13, "Chandelier", not i_ce_enable ? "off" : ce_dir == 1 ? "LONG" : "SHORT", not i_ce_enable ? OFF_TC : ce_dir == 1 ? color.lime : color.fuchsia)
+
+    string warn = pp_status != "ok" and i_pp_enable ? pp_status : htfTooLow and i_vw_enable ? "HTF below chart TF" : not hasVolume and i_vw_enable ? "no volume: EMA fallback" : "ok"
+    _hdr(14, "STATUS")
+    _row(15, "Health", warn, warn == "ok" ? color.new(color.gray, 20) : color.orange)
+
+// ============================================================================
+// SECTION 16 — ALERTS
+// ============================================================================
+
+// --- Structure
+alertcondition(mss_bull_liq,        "Bullish MSS at Liquidity",   "Bullish market structure shift confirmed at a liquidity level.")
+alertcondition(mss_bear_liq,        "Bearish MSS at Liquidity",   "Bearish market structure shift confirmed at a liquidity level.")
+alertcondition(mss_bull_choch and near_liquidity, "Bullish CHoCH at Liquidity", "Bullish CHoCH at liquidity — break against the prevailing bias.")
+alertcondition(mss_bear_choch and near_liquidity, "Bearish CHoCH at Liquidity", "Bearish CHoCH at liquidity — break against the prevailing bias.")
+alertcondition(mss_bull_validated,  "Validated Bullish BOS",      "Bullish structural break with the VWMA regime and Chandelier already aligned long.")
+alertcondition(mss_bear_validated,  "Validated Bearish BOS",      "Bearish structural break with the VWMA regime and Chandelier already aligned short.")
+
+// --- Liquidity
+alertcondition(bsl_swept,           "BSL Swept",                  "Buy-side liquidity taken.")
+alertcondition(ssl_swept,           "SSL Swept",                  "Sell-side liquidity taken.")
+alertcondition(bsl_ftc,             "FTC Bearish (BSL wick-only)","Wick swept buy-side liquidity but the candle closed back below it — failed auction above.")
+alertcondition(ssl_ftc,             "FTC Bullish (SSL wick-only)","Wick swept sell-side liquidity but the candle closed back above it — failed auction below.")
+alertcondition(near_bsl and not near_bsl[1], "Price Near BSL",    "Price is within the configured ATR proximity of the nearest unswept buy-side pool.")
+alertcondition(near_ssl and not near_ssl[1], "Price Near SSL",    "Price is within the configured ATR proximity of the nearest unswept sell-side pool.")
+alertcondition(dol_bsl and not dol_bsl[1],   "Draw on Liquidity — BSL", "Structure bias turned bullish with an unswept buy-side pool above.")
+alertcondition(dol_ssl and not dol_ssl[1],   "Draw on Liquidity — SSL", "Structure bias turned bearish with an unswept sell-side pool below.")
+
+// --- Regime
+alertcondition(ce_flip_up,          "Chandelier Flip Long",       "Chandelier Exit flipped to long.")
+alertcondition(ce_flip_dn,          "Chandelier Flip Short",      "Chandelier Exit flipped to short.")
+
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE — 369 TIME CYCLE MATRIX
+// ══════════════════════════════════════════════════════════════════════════
+
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © nsgcje
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  369 TIME CYCLE MATRIX  —  Phase 1 core engine
+//  (+ Phase 2 subdivisions, Phase 3 labels, Phase 5 internal data layer,
+//     Phase 6 extension points)
+//
+//  WHAT THIS IS
+//  A time-cycle VISUALISATION and RESEARCH tool. It shades every hour whose
+//  local hour number is divisible by 3, in a user-selected timezone.
+//
+//  WHAT THIS IS NOT
+//  It is not a signal generator, and it makes no claim that 3/6/9 timing
+//  predicts price direction. It is a clock, not a strategy. Its job is to
+//  expose these recurring windows cleanly so a separate model can be
+//  measured against them.
+//
+//  REPAINTING
+//  None. Every value comes from the current bar's own time and OHLCV.
+//  No request.security(), no lookahead, no future reference. A window's box
+//  is frozen on the bar the window ends and is never touched again; only the
+//  currently-active window updates, which is normal live-bar behaviour.
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 1 — INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+G_CORE = "369 Core"
+G_APP  = "Appearance"
+G_CYC  = "Cycle Filter"
+G_SUB  = "Subdivisions"
+G_SESS = "Market Sessions"
+G_DATA = "Window Data (Phase 5)"
+G_STAT = "Statistics (Phase 5)"
+
+
+tzMode = input.string("America/New_York", "Timezone",
+     options = ["Chart / Exchange", "America/New_York", "America/Chicago",
+                 "America/Los_Angeles", "UTC", "Europe/London", "Europe/Berlin",
+                 "Asia/Tokyo", "Asia/Shanghai", "Australia/Sydney", "Custom"],
+     group   = G_CORE,
+     tooltip = "All 369 hour arithmetic is done in this timezone. " +
+               "'Chart / Exchange' follows syminfo.timezone, so the windows " +
+               "track the instrument rather than your desk.")
+
+tzCustom = input.string("America/New_York", "Custom timezone (IANA name)",
+     group   = G_CORE,
+     tooltip = "Used only when Timezone = Custom. Use an IANA identifier such " +
+               "as America/Denver, Europe/Zurich, Asia/Kolkata. A fixed offset " +
+               "like GMT-5 also works but will NOT follow daylight saving.")
+
+lookback = input.int(100, "Historical windows to keep", minval = 1, maxval = 400,
+     group   = G_CORE,
+     tooltip = "How many 369 windows stay drawn. Pine allows 500 boxes; " +
+               "400 is the cap here to leave headroom.")
+
+warnTf = input.bool(true, "Warn on unsupported timeframe", group = G_CORE)
+
+// ── Cycle filter ───────────────────────────────────────────────────────────
+useH00 = input.bool(true, "12 AM", group = G_CYC, inline = "c1")
+useH03 = input.bool(true, "3 AM",  group = G_CYC, inline = "c1")
+useH06 = input.bool(true, "6 AM",  group = G_CYC, inline = "c1")
+useH09 = input.bool(true, "9 AM",  group = G_CYC, inline = "c1")
+useH12 = input.bool(true, "12 PM", group = G_CYC, inline = "c2")
+useH15 = input.bool(true, "3 PM",  group = G_CYC, inline = "c2")
+useH18 = input.bool(true, "6 PM",  group = G_CYC, inline = "c2")
+useH21 = input.bool(true, "9 PM",  group = G_CYC, inline = "c2")
+
+// ── Appearance ─────────────────────────────────────────────────────────────
+fillCol   = input.color(color.teal, "Block fill", group = G_APP, inline = "f")
+fillTrans = input.int(90, "Transparency", minval = 0, maxval = 100, group = G_APP, inline = "f")
+
+showBorder  = input.bool(true, "Border", group = G_APP, inline = "b")
+borderCol   = input.color(color.teal, "Border colour", group = G_APP, inline = "b")
+borderTrans = input.int(55, "Transp.", minval = 0, maxval = 100, group = G_APP, inline = "b")
+borderWidth = input.int(1, "Width", minval = 1, maxval = 4, group = G_APP, inline = "b")
+
+showLabel = input.bool(true, "Hour labels", group = G_APP, inline = "l")
+labelCol  = input.color(color.teal, "Label colour", group = G_APP, inline = "l")
+labelSize = input.string("Tiny", "Size", options = ["Tiny", "Small", "Normal", "Large"],
+     group = G_APP, inline = "l")
+maxLabels = input.int(30, "Max labels kept", minval = 1, maxval = 200, group = G_APP,
+     tooltip = "Labels are kept only on the most recent N windows. Pine cannot " +
+               "detect zoom level, so this is the practical way to stop label spam.")
+
+// ── Subdivisions (Phase 2) ─────────────────────────────────────────────────
+showDivs = input.bool(false, "Show 15-minute divisions", group = G_SUB,
+     tooltip = "Splits each 369 hour into :00-:15 opening, :15-:30 development, " +
+               ":30-:45 expansion, :45-:60 closing. Off by default — a Phase 2 " +
+               "layer on top of the verified Phase 1 engine.")
+divCol   = input.color(color.new(color.teal, 55), "Division colour", group = G_SUB)
+divStyle = input.string("Dotted", "Style", options = ["Dotted", "Dashed", "Solid"], group = G_SUB)
+divKeep  = input.int(20, "Subdivision windows kept", minval = 1, maxval = 160, group = G_SUB,
+     tooltip = "3 lines per window. Pine allows 500 lines.")
+
+
+// ── Market sessions (Phase 4) ──────────────────────────────────────────────
+// A contextual layer, entirely independent of the 369 engine. Turning every
+// session off changes nothing about window detection, drawing or freezing.
+
+showAsia = input.bool(true, "Asia", group = G_SESS, inline = "a")
+asiaSpec = input.session("1900-0000", "Asia hours", group = G_SESS, inline = "a")
+asiaCol  = input.color(color.purple, "Asia colour", group = G_SESS, inline = "a")
+
+showLon  = input.bool(true, "London", group = G_SESS, inline = "l")
+lonSpec  = input.session("0300-0800", "London hours", group = G_SESS, inline = "l")
+lonCol   = input.color(color.blue, "London colour", group = G_SESS, inline = "l")
+
+showNY   = input.bool(true, "New York", group = G_SESS, inline = "n")
+nySpec   = input.session("0800-1700", "New York hours", group = G_SESS, inline = "n")
+nyCol    = input.color(color.orange, "New York colour", group = G_SESS, inline = "n")
+
+sessShowBg = input.bool(true, "Background shading", group = G_SESS,
+     tooltip = "Deliberately fainter than the 369 blocks. The 369 layer is the " +
+               "subject; sessions are the backdrop.")
+sessBgTrans    = input.int(94, "Background transparency", minval = 0, maxval = 100, group = G_SESS)
+sessShowLabels = input.bool(false, "Session labels", group = G_SESS)
+sessShowLevels = input.bool(false, "Session high/low levels", group = G_SESS,
+     tooltip = "Frozen when the session ends, then carried forward to the end of " +
+               "that trading day. The price of a level never changes once frozen.")
+sessLevelStyle = input.string("Dashed", "Level style", options = ["Dotted", "Dashed", "Solid"],
+     group = G_SESS)
+sessLevelWidth = input.int(1, "Level width", minval = 1, maxval = 3, group = G_SESS)
+sessKeep = input.int(10, "Session history (instances each)", minval = 1, maxval = 60,
+     group   = G_SESS,
+     tooltip = "Automatically clamped down if the 369 layer's own budget needs " +
+               "the room - the 369 blocks are the primary layer and keep theirs.")
+
+// ── Window data (Phase 5) ──────────────────────────────────────────────────
+showTable = input.bool(false, "Show window stats table", group = G_DATA,
+     tooltip = "Read-only view of the internal data layer, so the numbers a " +
+               "future statistics module would consume can be checked against " +
+               "the chart. Off by default.")
+tableRows = input.int(8, "Rows", minval = 1, maxval = 20, group = G_DATA)
+tablePos  = input.string("Top Right", "Position",
+     options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = G_DATA)
+
+
+// ── Statistics (Phase 5) ───────────────────────────────────────────────────
+// Descriptive statistics only. The engine is built so that "no meaningful
+// separation" is an outcome it can report, not one it has to work around.
+showStats = input.bool(false, "Show statistics dashboard", group = G_STAT)
+
+statLookback = input.string("100 days", "Statistics lookback",
+     options = ["20 days", "50 days", "100 days", "250 days", "All available"],
+     group   = G_STAT,
+     tooltip = "Measured back from the last bar on the chart, not from wall " +
+               "clock, so the same chart always yields the same numbers. " +
+               "'All available' is bounded by TradingView's history, which " +
+               "differs by plan and timeframe.")
+
+atrLen = input.int(14, "ATR length", minval = 1, maxval = 200, group = G_STAT,
+     tooltip = "ATR is sampled on the bar BEFORE an hour opens, so no bar " +
+               "inside the hour can influence the value used to normalise it.")
+
+minSample = input.int(30, "Minimum sample size", minval = 1, maxval = 1000, group = G_STAT,
+     tooltip = "Buckets below this are labelled LOW SAMPLE. They are still " +
+               "shown - hiding them would hide the fact that you do not have " +
+               "enough data yet.")
+
+showDistribution = input.bool(false, "Show median / min / max columns", group = G_STAT,
+     tooltip = "Guards against one outlier manufacturing an average.")
+showBySession = input.bool(false, "Show hour x session breakdown", group = G_STAT)
+showRanking   = input.bool(false, "Show rankings", group = G_STAT)
+
+statTablePos = input.string("Bottom Left", "Dashboard position",
+     options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = G_STAT)
+statTextSize = input.string("Tiny", "Dashboard text size",
+     options = ["Tiny", "Small", "Normal"], group = G_STAT)
+
+maxObs  = input.int(6000, "Max observations stored", minval = 500, maxval = 20000, group = G_STAT,
+     tooltip = "Oldest are dropped past this. On a 60m chart a long history " +
+               "can exceed it; raise it or shorten the lookback.")
+medCap  = input.int(500, "Median sample cap per bucket", minval = 50, maxval = 2000, group = G_STAT)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 2 — CONSTANTS, RESOLVED SETTINGS, HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+MS_MIN  = 60000
+MS_HOUR = 3600000
+
+// Resolved timezone. Nothing downstream reads anything else.
+tz = tzMode == "Chart / Exchange" ? syminfo.timezone : tzMode == "Custom" ? tzCustom : tzMode
+
+tfSec  = timeframe.in_seconds(timeframe.period)
+tfMs   = tfSec * 1000
+
+// Timeframe support:
+//   supported : intraday, and no single bar spans more than one hour
+//   aligned   : bars nest exactly inside an hour (3600 divisible by tfSec)
+supported = timeframe.isintraday and tfSec <= 3600
+aligned   = supported and (3600 % tfSec == 0)
+
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Large" ? size.large : size.normal
+
+f_lineStyle(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Solid" ? line.style_solid : line.style_dotted
+
+f_tablePos(string s) =>
+    s == "Top Left" ? position.top_left : s == "Bottom Right" ? position.bottom_right :
+     s == "Bottom Left" ? position.bottom_left : position.top_right
+
+// 15 -> "3 PM". Correct across both noon and midnight.
+f_hourName(int h) =>
+    hh = h % 12 == 0 ? 12 : h % 12
+    str.tostring(hh) + " " + (h < 12 ? "AM" : "PM")
+
+// ── Session classification ─────────────────────────────────────────────────
+// Derived purely from which configured sessions the bar actually falls in, so
+// it stays correct when a user retimes a session or switches timezone. There
+// are no hard-coded clock labels anywhere in here.
+f_sessClass(bool a, bool l, bool n) =>
+    cnt = (a ? 1 : 0) + (l ? 1 : 0) + (n ? 1 : 0)
+    cnt == 0 ? "NONE" : cnt > 1 ? "OVERLAP" : a ? "ASIA" : l ? "LONDON" : "NEW YORK"
+
+f_sessOverlap(bool a, bool l, bool n) =>
+    a and l and n ? "ASIA+LONDON+NEW YORK" :
+     a and l ? "ASIA+LONDON" :
+     l and n ? "LONDON+NEW YORK" :
+     a and n ? "ASIA+NEW YORK" : "NONE"
+
+// ── Shared drawing budget ──────────────────────────────────────────────────
+// Pine's 500-object ceilings are per type and shared by both layers, so the
+// caps have to be negotiated rather than set independently. The visual
+// hierarchy decides who yields: 369 blocks keep their full allocation, session
+// history gives way to them, and 15-minute subdivisions give way to session
+// levels. Nothing is silently over-budget; the lower-priority layer just keeps
+// fewer instances.
+sessCount = enableSess ? ((showAsia ? 1 : 0) + (showLon ? 1 : 0) + (showNY ? 1 : 0)) : 0
+
+sessBoxRoom = math.max(0, 495 - lookback)
+effSessKeep = sessCount > 0 ? math.min(sessKeep, int(math.floor(sessBoxRoom / sessCount))) : sessKeep
+
+sessLineUse = (enableSess and sessShowLevels) ? sessCount * 2 * effSessKeep : 0
+effDivKeep  = math.min(divKeep, int(math.floor(math.max(0, 495 - sessLineUse) / 3)))
+
+// ── Statistics helpers ─────────────────────────────────────────────────────
+MS_DAY = 86400000
+
+f_lookbackDays(string s) =>
+    s == "20 days" ? 20 : s == "50 days" ? 50 : s == "100 days" ? 100 :
+     s == "250 days" ? 250 : 0
+
+// Session classification <-> array index. NONE deliberately gets its own slot
+// rather than being folded away: "no session was running" is a real category.
+f_sessIdx(string c) =>
+    c == "ASIA" ? 1 : c == "LONDON" ? 2 : c == "NEW YORK" ? 3 : c == "OVERLAP" ? 4 : 0
+
+f_sessName(int i) =>
+    i == 1 ? "ASIA" : i == 2 ? "LONDON" : i == 3 ? "NY" : i == 4 ? "OVERLAP" : "NONE"
+
+f_hh(int h) =>
+    (h < 10 ? "0" : "") + str.tostring(h)
+
+// Is this 369 hour switched on in the cycle filter?
+f_cycleEnabled(int h) =>
+    h ==  0 ? useH00 : h ==  3 ? useH03 : h ==  6 ? useH06 : h ==  9 ? useH09 :
+     h == 12 ? useH12 : h == 15 ? useH15 : h == 18 ? useH18 : h == 21 ? useH21 : false
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 3 — DATA MODEL (Phase 5 foundation)
+//
+//  One Cycle369 object per window. It owns both its statistics and its
+//  drawing handles, so a window is a single unit to create, update, freeze
+//  and destroy. Research modules added later read these objects and never
+//  need to redo the time arithmetic.
+// ═══════════════════════════════════════════════════════════════════════════
+
+type Cycle369
+    // identity
+    int    key            // year/month/day/hour fingerprint
+    int    hourLocal      // 0, 3, 6, 9, 12, 15, 18 or 21 in the selected timezone
+    int    startT         // ms epoch, open of the window's first bar
+    int    endT           // ms epoch, close of the window's last bar
+    // OHLCV
+    float  o
+    float  h
+    float  l
+    float  c
+    float  vol
+    int    barCount
+    // derived — computed once, at freeze
+    float  rng
+    float  rngTicks
+    float  rngPct
+    string dir
+    // Phase 4 session context — written by the session layer, never read by
+    // the detection engine. A 369 window is defined by the clock alone.
+    string sessOpen        // classification on the window's first bar
+    string sessClose       // classification on the window's last bar
+    string sessOverlap     // which sessions overlapped at the window's open
+    bool   sessMixed       // did the window straddle a session boundary?
+    float  sessHiAtOpen    // containing session's developing high at window open
+    float  sessLoAtOpen    // containing session's developing low at window open
+    bool   tookSessHi      // did the window trade above that high?
+    bool   tookSessLo      // did the window trade below that low?
+    // lifecycle
+    bool   active
+    // drawing handles
+    box    bx
+    label  lb
+    line   dv1
+    line   dv2
+    line   dv3
+
+var array<Cycle369> windows   = array.new<Cycle369>()
+var array<label>    labelPool = array.new<label>()
+var array<line>     linePool  = array.new<line>()
+
+var Cycle369 cur = na
+
+
+// One SessionZone per session instance, following exactly the same lifecycle
+// philosophy as Cycle369: it owns its own statistics and its own drawings, it
+// is frozen when the session ends, and a frozen zone's prices never change.
+// It is a SEPARATE object on purpose. A 3 AM bar can be inside a 369 window
+// and inside London simultaneously, and the chart has to be able to say so.
+type SessionZone
+    string name
+    int    startT
+    int    endT
+    int    dayKey        // trading day the session ended on, for level carry-forward
+    float  hi
+    float  lo
+    bool   active
+    box    bx
+    label  lb
+    line   hiLn
+    line   loLn
+
+var array<SessionZone> asiaHist = array.new<SessionZone>()
+var array<SessionZone> lonHist  = array.new<SessionZone>()
+var array<SessionZone> nyHist   = array.new<SessionZone>()
+
+var SessionZone asiaCur = na
+var SessionZone lonCur  = na
+var SessionZone nyCur   = na
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DATA LAYER (Phase 5)
+//
+//  Every completed hour is recorded here — 369 or not. This is the single
+//  most important design decision in the statistics engine: the baseline is
+//  not a separate mechanism, it is the same mechanism with a different hour
+//  number. Any collection quirk therefore lands on both populations equally
+//  and cancels in the comparison.
+//
+//  Observations are parallel primitive arrays rather than objects: a few tens
+//  of thousands of numbers cost far less than a few thousand UDT instances,
+//  and nothing here is ever drawn.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var array<int>   obsTime  = array.new<int>()      // window start, ms epoch
+var array<int>   obsHour  = array.new<int>()      // 0..23 local
+var array<int>   obsSess  = array.new<int>()      // session classification index
+var array<int>   obsDir   = array.new<int>()      // +1 / -1 / 0
+var array<float> obsRange = array.new<float>()
+var array<float> obsPct   = array.new<float>()
+var array<float> obsATR   = array.new<float>()    // range / prior ATR
+var array<float> obsBody  = array.new<float>()    // |close-open| / range, %
+var array<float> obsUp    = array.new<float>()    // high - max(open, close)
+var array<float> obsLo    = array.new<float>()    // min(open, close) - low
+
+// One tracked hour. Same three lifecycle rules as Cycle369 — matching key and
+// under 60 real minutes elapsed — minus the %3 test and minus the cycle
+// filter, because statistics must cover all eight 369 hours regardless of
+// which ones the user has chosen to draw.
+type HourWin
+    int   key
+    int   hourLocal
+    int   startT
+    float o
+    float h
+    float l
+    float c
+    int   bars
+    float atrPrior     // ATR as of the bar BEFORE this hour opened
+    int   sessIdx
+    bool  active
+
+var HourWin hcur = na
+
+// An aggregation bucket. Sums only, so adding an observation is O(1) and the
+// memory does not grow with history. `med` is allocated only for the buckets
+// that actually report a median.
+type Bucket
+    int   n
+    float sRange
+    float sPct
+    float sATR
+    int   nATR
+    int   bull
+    int   bear
+    int   neu
+    float sBody
+    int   nBody
+    float sUp
+    float sLo
+    float minR
+    float maxR
+    array<float> med
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 4 — WINDOW LIFECYCLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Called exactly once per window, on the bar where that window ends.
+//
+// PHASE 6 EXTENSION POINT
+// Liquidity sweeps, FVG / MSS detection, session interaction, MFE / MAE and
+// continuation-vs-reversal classification all belong here. Add fields to
+// Cycle369, populate them in this function, and nothing in the drawing
+// engine below has to change.
+f_freeze(Cycle369 w) =>
+    w.rng      := w.h - w.l
+    w.rngTicks := syminfo.mintick > 0 ? w.rng / syminfo.mintick : float(na)
+    w.rngPct   := w.o != 0 ? w.rng / w.o * 100 : float(na)
+    w.dir      := w.c > w.o ? "Bullish" : w.c < w.o ? "Bearish" : "Neutral"
+    w.sessMixed := w.sessOpen != w.sessClose
+    w.active   := false
+    w
+
+// Lazily create, then keep updating, one subdivision line.
+// The line is only created once the chart has actually reached that minute,
+// so nothing is ever drawn into unconfirmed future time.
+f_div(line ln, int t, float top, float bot) =>
+    line res = ln
+    if showDivs and time >= t
+        if na(res)
+            res := line.new(t, top, t, bot, xloc = xloc.bar_time,
+                 color = divCol, width = 1, style = f_lineStyle(divStyle))
+            array.push(linePool, res)
+        else
+            line.set_y1(res, top)
+            line.set_y2(res, bot)
+    res
+
+
+// One step of a session's lifecycle. Called once per session per bar with that
+// session's own state, so all three share this code and none can drift from
+// the others. Mirrors the 369 lifecycle deliberately: open -> extend -> freeze,
+// with drawings owned by the object and pruned when a new instance opens.
+f_sessStep(SessionZone z, array<SessionZone> hist, bool inSess, string nm, color col,
+     int keep, int curDayKey) =>
+    SessionZone res = z
+
+    bool wasActive = false
+    if not na(res)
+        wasActive := res.active
+
+    // ── freeze: the session just ended on the previous bar ─────────────────
+    // Levels are created here, once, from the final high/low. Their price is
+    // never written again, which is what makes historical levels non-repainting.
+    if wasActive and not inSess
+        res.active := false
+        res.dayKey := curDayKey
+        if sessShowLevels
+            res.hiLn := line.new(res.startT, res.hi, time + tfMs, res.hi, xloc = xloc.bar_time,
+                 color = color.new(col, 25), style = f_lineStyle(sessLevelStyle), width = sessLevelWidth)
+            res.loLn := line.new(res.startT, res.lo, time + tfMs, res.lo, xloc = xloc.bar_time,
+                 color = color.new(col, 25), style = f_lineStyle(sessLevelStyle), width = sessLevelWidth)
+
+    // ── open a new instance ────────────────────────────────────────────────
+    if inSess and not wasActive
+        box bx = na
+        if sessShowBg
+            bx := box.new(time, high, time + tfMs, low, xloc = xloc.bar_time,
+                 bgcolor      = color.new(col, sessBgTrans),
+                 border_color = color.new(col, 100),
+                 border_width = 0)
+
+        label lb = na
+        if sessShowLabels
+            lb := label.new(time, low, nm, xloc = xloc.bar_time, yloc = yloc.price,
+                 style     = label.style_label_up,
+                 color     = color.new(color.black, 100),
+                 textcolor = color.new(col, 15),
+                 size      = size.tiny)
+
+        res := SessionZone.new(name = nm, startT = time, endT = time + tfMs,
+             dayKey = curDayKey, hi = high, lo = low, active = true,
+             bx = bx, lb = lb, hiLn = line(na), loLn = line(na))
+        array.push(hist, res)
+
+        while array.size(hist) > keep
+            SessionZone d = array.shift(hist)
+            if not na(d.bx)
+                box.delete(d.bx)
+            if not na(d.lb)
+                label.delete(d.lb)
+            if not na(d.hiLn)
+                line.delete(d.hiLn)
+            if not na(d.loLn)
+                line.delete(d.loLn)
+
+    // ── extend the live instance ───────────────────────────────────────────
+    if inSess and not na(res)
+        res.hi   := math.max(res.hi, high)
+        res.lo   := math.min(res.lo, low)
+        res.endT := time + tfMs
+        if not na(res.bx)
+            box.set_top(res.bx, res.hi)
+            box.set_bottom(res.bx, res.lo)
+            box.set_right(res.bx, res.endT)
+        if not na(res.lb)
+            label.set_y(res.lb, res.lo)
+
+    // ── carry the last completed levels forward through their trading day ──
+    // Only x2 moves. The prices are frozen, so this cannot repaint a level.
+    if sessShowLevels
+        n = array.size(hist)
+        if n > 0
+            SessionZone z0 = array.get(hist, n - 1)
+            if z0.active and n > 1
+                z0 := array.get(hist, n - 2)
+            if not z0.active
+                if not na(z0.hiLn) and z0.dayKey == curDayKey
+                    line.set_x2(z0.hiLn, time + tfMs)
+                    line.set_x2(z0.loLn, time + tfMs)
+    res
+
+
+// ── Aggregation layer (Phase 5) ────────────────────────────────────────────
+// Pure arithmetic over the observation arrays. No drawing calls in here, by
+// design: statistics must be computable without a chart so the Python port
+// can verify them.
+
+f_newBucket(bool keepMed) =>
+    array<float> m = na
+    if keepMed
+        m := array.new<float>()
+    Bucket.new(n = 0, sRange = 0.0, sPct = 0.0, sATR = 0.0, nATR = 0,
+         bull = 0, bear = 0, neu = 0, sBody = 0.0, nBody = 0, sUp = 0.0, sLo = 0.0,
+         minR = float(na), maxR = float(na), med = m)
+
+// Fold observation `i` into bucket `b`. Metrics that can legitimately be na
+// (percentage on a zero open, ATR before enough history, body on a zero range)
+// carry their own counters, so a missing value shrinks that metric's sample
+// rather than silently biasing its mean toward zero.
+f_add(Bucket b, int i) =>
+    rng = array.get(obsRange, i)
+    b.n      := b.n + 1
+    b.sRange := b.sRange + rng
+    b.minR   := na(b.minR) ? rng : math.min(b.minR, rng)
+    b.maxR   := na(b.maxR) ? rng : math.max(b.maxR, rng)
+
+    pct = array.get(obsPct, i)
+    if not na(pct)
+        b.sPct := b.sPct + pct
+
+    ratr = array.get(obsATR, i)
+    if not na(ratr)
+        b.sATR := b.sATR + ratr
+        b.nATR := b.nATR + 1
+
+    d = array.get(obsDir, i)
+    if d > 0
+        b.bull := b.bull + 1
+    else if d < 0
+        b.bear := b.bear + 1
+    else
+        b.neu := b.neu + 1
+
+    bp = array.get(obsBody, i)
+    if not na(bp)
+        b.sBody := b.sBody + bp
+        b.nBody := b.nBody + 1
+
+    b.sUp := b.sUp + array.get(obsUp, i)
+    b.sLo := b.sLo + array.get(obsLo, i)
+
+    if not na(b.med)
+        if array.size(b.med) >= medCap
+            array.shift(b.med)
+        array.push(b.med, rng)
+
+f_mean(float sum, int n)   => n > 0 ? sum / n : float(na)
+// NOTE: `100.0 *` first, deliberately. Pine does INTEGER division on two ints,
+// so `k / n * 100.0` evaluates k/n to 0 for every k < n and every rate in the
+// dashboard would render as 0% or 100%.
+f_rate(int k, int n)       => n > 0 ? 100.0 * k / n : float(na)
+f_status(int n)            => n == 0 ? "NO DATA" : n < minSample ? "LOW SAMPLE" : "VALID"
+
+// Freeze one hour and push it into the observation store. Called on the first
+// bar that is no longer inside it, so a recorded observation is final. The
+// active hour is never pushed, which is what keeps the statistics from
+// changing on realtime ticks.
+f_hourFreeze(HourWin w) =>
+    if w.bars > 0
+        rng = w.h - w.l
+        array.push(obsTime,  w.startT)
+        array.push(obsHour,  w.hourLocal)
+        array.push(obsSess,  w.sessIdx)
+        array.push(obsDir,   w.c > w.o ? 1 : w.c < w.o ? -1 : 0)
+        array.push(obsRange, rng)
+        array.push(obsPct,   w.o != 0 ? rng / w.o * 100 : float(na))
+        array.push(obsATR,   (not na(w.atrPrior) and w.atrPrior > 0) ? rng / w.atrPrior : float(na))
+        array.push(obsBody,  rng > 0 ? math.abs(w.c - w.o) / rng * 100 : float(na))
+        array.push(obsUp,    w.h - math.max(w.o, w.c))
+        array.push(obsLo,    math.min(w.o, w.c) - w.l)
+
+        while array.size(obsTime) > maxObs
+            array.shift(obsTime)
+            array.shift(obsHour)
+            array.shift(obsSess)
+            array.shift(obsDir)
+            array.shift(obsRange)
+            array.shift(obsPct)
+            array.shift(obsATR)
+            array.shift(obsBody)
+            array.shift(obsUp)
+            array.shift(obsLo)
+    w.active := false
+    w
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 5 — MARKET SESSION ENGINE (Phase 4)
+//
+//  Runs BEFORE the 369 engine so that a window opening on this bar can read
+//  the session state of this bar. That is the only coupling between the two
+//  layers, and it points one way: sessions inform the 369 data model, never
+//  the 369 detection. Disable every session and Section 6 behaves identically.
+//
+//  Session membership comes from time(timeframe.period, spec, tz) using the
+//  same authoritative `tz` as the 369 engine. There is no second timezone
+//  system and no UTC offset arithmetic anywhere: because the session spec is
+//  interpreted in `tz`, a session that starts at 03:00 local starts at 03:00
+//  local on both sides of a DST transition, by construction.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Called unconditionally — session membership must be evaluated on every bar.
+asiaT = time(timeframe.period, asiaSpec, tz)
+lonT  = time(timeframe.period, lonSpec,  tz)
+nyT   = time(timeframe.period, nySpec,   tz)
+
+inAsia = enableSess and showAsia and not na(asiaT)
+inLon  = enableSess and showLon  and not na(lonT)
+inNY   = enableSess and showNY   and not na(nyT)
+
+dayKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+
+asiaCur := f_sessStep(asiaCur, asiaHist, inAsia, "ASIA",     asiaCol, effSessKeep, dayKey)
+lonCur  := f_sessStep(lonCur,  lonHist,  inLon,  "LONDON",   lonCol,  effSessKeep, dayKey)
+nyCur   := f_sessStep(nyCur,   nyHist,   inNY,   "NEW YORK", nyCol,   effSessKeep, dayKey)
+
+sessClassNow   = f_sessClass(inAsia, inLon, inNY)
+sessOverlapNow = f_sessOverlap(inAsia, inLon, inNY)
+
+// Union of the developing extremes of whichever sessions are live right now.
+// na when no session is active, which is the honest answer rather than 0.
+float actSessHi = na
+float actSessLo = na
+if inAsia and not na(asiaCur)
+    actSessHi := na(actSessHi) ? asiaCur.hi : math.max(actSessHi, asiaCur.hi)
+    actSessLo := na(actSessLo) ? asiaCur.lo : math.min(actSessLo, asiaCur.lo)
+if inLon and not na(lonCur)
+    actSessHi := na(actSessHi) ? lonCur.hi : math.max(actSessHi, lonCur.hi)
+    actSessLo := na(actSessLo) ? lonCur.lo : math.min(actSessLo, lonCur.lo)
+if inNY and not na(nyCur)
+    actSessHi := na(actSessHi) ? nyCur.hi : math.max(actSessHi, nyCur.hi)
+    actSessLo := na(actSessLo) ? nyCur.lo : math.min(actSessLo, nyCur.lo)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 6 — 369 DETECTION ENGINE
+//
+//  A window stays open while ALL of these hold:
+//    1. local hour % 3 == 0                    (it is a 369 hour)
+//    2. the y/m/d/h fingerprint matches the open window
+//    3. fewer than 60 real minutes have elapsed since the window opened
+//
+//  Rule 3 is what makes the engine DST-safe. On a fall-back transition the
+//  wall clock repeats an hour, so rules 1+2 on their own would fuse two
+//  distinct 60-minute windows into one 120-minute block. The elapsed-time
+//  bound closes the first window at exactly 60 minutes and lets the repeat
+//  open a window of its own.
+// ═══════════════════════════════════════════════════════════════════════════
+
+hLocal = hour(time, tz)
+key    = year(time, tz) * 1000000 + month(time, tz) * 10000 + dayofmonth(time, tz) * 100 + hLocal
+
+is369 = enable369 and supported and (hLocal % 3 == 0) and f_cycleEnabled(hLocal)
+
+// Field access is nested inside the na-check rather than chained after it
+// with `and`: reading a field of an na object is a runtime error in Pine, and
+// short-circuit order is not a guarantee worth betting the script on.
+bool sameWindow = false
+if not na(cur)
+    if cur.active
+        sameWindow := key == cur.key and time < cur.startT + MS_HOUR
+
+openNew    = is369 and not sameWindow
+continuing = is369 and sameWindow
+
+// ── 1. Freeze the outgoing window ──────────────────────────────────────────
+// Runs on the first bar that is no longer inside it, so the frozen values are
+// final from that point on and never change again.
+if not na(cur)
+    if cur.active and (not is369 or openNew)
+        cur := f_freeze(cur)
+
+// ── 2. Open a new window ───────────────────────────────────────────────────
+if openNew
+    bx = box.new(time, high, time + tfMs, low,
+         xloc         = xloc.bar_time,
+         bgcolor      = color.new(fillCol, fillTrans),
+         border_color = showBorder ? color.new(borderCol, borderTrans) : color.new(color.white, 100),
+         border_width = showBorder ? borderWidth : 0)
+
+    label lb = na
+    if showLabel
+        lb := label.new(time, high, f_hourName(hLocal) + " — 369",
+             xloc      = xloc.bar_time,
+             yloc      = yloc.price,
+             style     = label.style_label_down,
+             color     = color.new(color.black, 100),
+             textcolor = labelCol,
+             size      = f_size(labelSize))
+        array.push(labelPool, lb)
+
+    cur := Cycle369.new(
+         key = key, hourLocal = hLocal, startT = time, endT = time + tfMs,
+         o = open, h = high, l = low, c = close, vol = nz(volume), barCount = 1,
+         rng = float(na), rngTicks = float(na), rngPct = float(na), dir = string(na),
+         sessOpen = sessClassNow, sessClose = sessClassNow, sessOverlap = sessOverlapNow,
+         sessMixed = false, sessHiAtOpen = actSessHi, sessLoAtOpen = actSessLo,
+         tookSessHi = false, tookSessLo = false,
+         active = true, bx = bx, lb = lb, dv1 = line(na), dv2 = line(na), dv3 = line(na))
+
+    array.push(windows, cur)
+
+    // ── Object budget ──────────────────────────────────────────────────────
+    // Pruned only when a window opens, so drawing count is bounded without
+    // touching anything on ordinary bars. Label and line caps are clamped to
+    // the box cap so no label or divider can outlive the box it belongs to.
+    while array.size(windows) > lookback
+        dropped = array.shift(windows)
+        box.delete(dropped.bx)
+
+    keepLabels = math.min(maxLabels, lookback)
+    while array.size(labelPool) > keepLabels
+        label.delete(array.shift(labelPool))
+
+    keepLines = math.min(effDivKeep, lookback) * 3
+    while array.size(linePool) > keepLines
+        line.delete(array.shift(linePool))
+
+// ── 3. Extend the live window ──────────────────────────────────────────────
+if continuing
+    cur.h        := math.max(cur.h, high)
+    cur.l        := math.min(cur.l, low)
+    cur.c        := close
+    cur.vol      := cur.vol + nz(volume)
+    cur.barCount := cur.barCount + 1
+    cur.endT     := time + tfMs
+
+    // Session context. Interaction here means only "price traded beyond the
+    // level" — it is raw material, not a sweep. A sweep needs interaction plus
+    // a reversal, and that classification belongs in Phase 6, not here.
+    cur.sessClose := sessClassNow
+    if not na(cur.sessHiAtOpen)
+        if high > cur.sessHiAtOpen
+            cur.tookSessHi := true
+    if not na(cur.sessLoAtOpen)
+        if low < cur.sessLoAtOpen
+            cur.tookSessLo := true
+
+// ── 4. Redraw the live window, and only the live window ────────────────────
+// Historical boxes are never addressed again, which is what keeps completed
+// windows stable bar to bar.
+if (openNew or continuing) and not na(cur)
+    box.set_top(cur.bx, cur.h)
+    box.set_bottom(cur.bx, cur.l)
+    box.set_right(cur.bx, cur.endT)
+
+    if not na(cur.lb)
+        label.set_y(cur.lb, cur.h)
+
+    cur.dv1 := f_div(cur.dv1, cur.startT + 15 * MS_MIN, cur.h, cur.l)
+    cur.dv2 := f_div(cur.dv2, cur.startT + 30 * MS_MIN, cur.h, cur.l)
+    cur.dv3 := f_div(cur.dv3, cur.startT + 45 * MS_MIN, cur.h, cur.l)
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 7 — HOUR ENGINE (Phase 5 data collection)
+//
+//  Tracks EVERY hour, not only the 369 ones. The 369 population and the
+//  non-369 baseline are therefore produced by the same code, on the same
+//  bars, with the same boundary rules and the same ATR methodology. Nothing
+//  about the comparison depends on two engines agreeing with each other.
+//
+//  Boundary rules are identical to Section 6 minus the %3 test and minus the
+//  cycle filter, so the DST guard carries over unchanged: an hour ends after
+//  60 real minutes even when the wall clock repeats it.
+//
+//  Runs after Sections 5 and 6 so it can reuse `key`, `hLocal` and the
+//  session classification already computed for this bar.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ATR is a series and must be evaluated on every bar. The value SNAPSHOT taken
+// when an hour opens is atrPrior = atr[1]: the ATR through the previous bar,
+// which is entirely outside the hour it will be used to normalise. No bar
+// inside a window can affect that window's own normaliser.
+atrSeries = ta.atr(atrLen)
+
+statsOn = enableStats and supported
+
+bool hSame = false
+if not na(hcur)
+    if hcur.active
+        hSame := key == hcur.key and time < hcur.startT + MS_HOUR
+
+hOpen = statsOn and not hSame
+hCont = statsOn and hSame
+
+if not na(hcur)
+    if hcur.active and (not statsOn or hOpen)
+        hcur := f_hourFreeze(hcur)
+
+if hOpen
+    hcur := HourWin.new(key = key, hourLocal = hLocal, startT = time,
+         o = open, h = high, l = low, c = close, bars = 1,
+         atrPrior = atrSeries[1], sessIdx = f_sessIdx(sessClassNow), active = true)
+
+if hCont
+    hcur.h    := math.max(hcur.h, high)
+    hcur.l    := math.min(hcur.l, low)
+    hcur.c    := close
+    hcur.bars := hcur.bars + 1
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 8 — AGGREGATION & BASELINE (Phase 5)
+//
+//  Runs on the last bar only, and only when the observation count has
+//  changed — i.e. only when an hour has actually closed. That is both the
+//  performance story and the no-repaint guarantee: realtime ticks inside the
+//  live hour cannot move a single published number.
+//
+//  The lookback cutoff is measured back from the LAST BAR ON THE CHART, not
+//  from wall clock, so re-running the same chart yields the same statistics.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var array<Bucket> byHour  = na       // 24, indexed by local hour
+var array<Bucket> byCombo = na       // 120, indexed by hour * 5 + sessIdx
+var Bucket        bAll369 = na
+var Bucket        bBase   = na
+var int  lastObsN  = -1
+var bool statsFresh = false
+
+if barstate.islast and enableStats and showStats
+    if array.size(obsTime) != lastObsN or na(byHour)
+        lastObsN := array.size(obsTime)
+
+        byHour  := array.new<Bucket>()
+        byCombo := array.new<Bucket>()
+        for i = 0 to 23
+            array.push(byHour, f_newBucket(true))
+        for i = 0 to 119
+            array.push(byCombo, f_newBucket(false))
+        bAll369 := f_newBucket(true)
+        bBase   := f_newBucket(true)
+
+        lbDays = f_lookbackDays(statLookback)
+        cutoff = lbDays > 0 ? time - lbDays * MS_DAY : 0
+
+        n = array.size(obsTime)
+        if n > 0
+            for i = 0 to n - 1
+                if array.get(obsTime, i) >= cutoff
+                    hr = array.get(obsHour, i)
+                    sx = array.get(obsSess, i)
+                    f_add(array.get(byHour, hr), i)
+                    f_add(array.get(byCombo, hr * 5 + sx), i)
+                    if hr % 3 == 0
+                        f_add(bAll369, i)
+                    else
+                        f_add(bBase, i)
+
+        statsFresh := true
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 9 — STATISTICS DASHBOARD (presentation only)
+//
+//  Reads buckets, formats strings. No statistics are computed here.
+//  Every rate carries its N, and every row carries a status, because a rate
+//  without a denominator is the single easiest way to fool yourself.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table dash = na
+
+f_txtSize(string s) => s == "Small" ? size.small : s == "Normal" ? size.normal : size.tiny
+
+// Column layout: base 11, plus 3 when distribution columns are on.
+DASH_COLS = 11
+dashCols  = showDistribution ? DASH_COLS + 3 : DASH_COLS
+dashRows  = 14 + (showBySession ? 41 : 0) + (showRanking ? 4 : 0)
+
+f_cell(table t, int c, int r, string txt, color col) =>
+    table.cell(t, c, r, txt, text_color = col, text_size = f_txtSize(statTextSize))
+
+// One statistics row. `base` is the comparison population; pass na for the
+// summary rows that ARE the baseline.
+f_row(table t, int r, string c0, string c1, Bucket b, Bucket base, color tint) =>
+    dim  = color.new(color.gray, 30)
+    body = b.n == 0 ? color.new(color.gray, 50) : b.n < minSample ? color.new(color.orange, 20) : tint
+
+    f_cell(t, 0, r, c0, body)
+    f_cell(t, 1, r, c1, dim)
+    f_cell(t, 2, r, str.tostring(b.n), body)
+    f_cell(t, 3, r, b.n > 0 ? str.tostring(f_mean(b.sRange, b.n), format.mintick) : "-", body)
+    f_cell(t, 4, r, b.nATR > 0 ? str.tostring(f_mean(b.sATR, b.nATR), "#.##") : "-", body)
+    f_cell(t, 5, r, b.n > 0 ? str.tostring(f_rate(b.bull, b.n), "#.#") : "-", body)
+    f_cell(t, 6, r, b.n > 0 ? str.tostring(f_rate(b.bear, b.n), "#.#") : "-", body)
+
+    // Relative effect vs the baseline population.
+    string eff = "-"
+    string dAtr = "-"
+    string dBull = "-"
+    if not na(base)
+        if b.n > 0 and base.n > 0
+            mb = f_mean(base.sRange, base.n)
+            eff := (not na(mb) and mb != 0) ? str.tostring(f_mean(b.sRange, b.n) / mb, "#.##") + "x" : "-"
+            dBull := str.tostring(f_rate(b.bull, b.n) - f_rate(base.bull, base.n), "+#.#;-#.#")
+        if b.nATR > 0 and base.nATR > 0
+            dAtr := str.tostring(f_mean(b.sATR, b.nATR) - f_mean(base.sATR, base.nATR), "+#.##;-#.##")
+    f_cell(t, 7, r, eff,   body)
+    f_cell(t, 8, r, dAtr,  body)
+    f_cell(t, 9, r, dBull, body)
+
+    st = f_status(b.n)
+    f_cell(t, 10, r, st,
+         st == "VALID" ? color.new(color.teal, 20) :
+         st == "LOW SAMPLE" ? color.new(color.orange, 10) : color.new(color.gray, 40))
+
+    if showDistribution
+        hasMed = not na(b.med)
+        okMed  = hasMed ? array.size(b.med) > 0 : false
+        f_cell(t, 11, r, okMed ? str.tostring(array.median(b.med), format.mintick) : "-", dim)
+        f_cell(t, 12, r, na(b.minR) ? "-" : str.tostring(b.minR, format.mintick), dim)
+        f_cell(t, 13, r, na(b.maxR) ? "-" : str.tostring(b.maxR, format.mintick), dim)
+
+// Which session an hour most often sat in, and how dominant that was. Reported
+// rather than assumed — an hour is not "London" because the clock says so.
+f_modalSession(int hr) =>
+    int bestI = 0
+    int bestN = 0
+    int tot   = 0
+    for sx = 0 to 4
+        bk = array.get(byCombo, hr * 5 + sx)
+        tot += bk.n
+        if bk.n > bestN
+            bestN := bk.n
+            bestI := sx
+    tot > 0 ? f_sessName(bestI) + " " + str.tostring(100.0 * bestN / tot, "#") + "%" : "-"
+
+// Order the eight 369 hours by a metric, printed as a plain ordered list so
+// the underlying numbers stay visible. Deliberately NOT combined into a score.
+f_rank(string mode) =>
+    vals = array.new<float>()
+    hrs  = array.new<int>()
+    for k = 0 to 7
+        hr = k * 3
+        b  = array.get(byHour, hr)
+        float v = na
+        if b.n >= minSample
+            if mode == "atr"
+                v := b.nATR > 0 ? f_mean(b.sATR, b.nATR) : na
+            else if mode == "bull"
+                v := bBase.n > 0 ? f_rate(b.bull, b.n) - f_rate(bBase.bull, bBase.n) : na
+            else
+                v := bBase.n > 0 ? f_rate(b.bear, b.n) - f_rate(bBase.bear, bBase.n) : na
+        if not na(v)
+            array.push(vals, v)
+            array.push(hrs, hr)
+    string outp = ""
+    while array.size(vals) > 0
+        int bi = 0
+        // Pine infers loop direction from the bounds, so `1 to 0` would run
+        // j=1 and read past the end of a single-element array. Guard it.
+        if array.size(vals) > 1
+            for j = 1 to array.size(vals) - 1
+                if array.get(vals, j) > array.get(vals, bi)
+                    bi := j
+        hv = array.get(vals, bi)
+        outp := outp + (outp == "" ? "" : "   ") + f_hh(array.get(hrs, bi)) + " (" +
+             str.tostring(hv, mode == "atr" ? "#.##" : "+#.#;-#.#") + ")"
+        array.remove(vals, bi)
+        array.remove(hrs, bi)
+    outp == "" ? "insufficient samples" : outp
+
+if barstate.islast and enableStats and showStats and statsFresh
+    if not na(dash)
+        table.delete(dash)
+    dash := table.new(f_tablePos(statTablePos), dashCols, dashRows,
+         border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 70))
+
+    hdr = color.new(color.gray, 10)
+    f_cell(dash, 0, 0, "Hour",   hdr)
+    f_cell(dash, 1, 0, "Session", hdr)
+    f_cell(dash, 2, 0, "N",      hdr)
+    f_cell(dash, 3, 0, "AvgRng", hdr)
+    f_cell(dash, 4, 0, "Rng/ATR", hdr)
+    f_cell(dash, 5, 0, "Bull%",  hdr)
+    f_cell(dash, 6, 0, "Bear%",  hdr)
+    f_cell(dash, 7, 0, "Effect", hdr)
+    f_cell(dash, 8, 0, "dATR",   hdr)
+    f_cell(dash, 9, 0, "dBull",  hdr)
+    f_cell(dash, 10, 0, "Status", hdr)
+    if showDistribution
+        f_cell(dash, 11, 0, "Median", hdr)
+        f_cell(dash, 12, 0, "Min",    hdr)
+        f_cell(dash, 13, 0, "Max",    hdr)
+
+    // ── primary summary ────────────────────────────────────────────────────
+    f_row(dash, 1, "ALL 369",  "-", bAll369, bBase, color.new(color.teal, 0))
+    Bucket noBase = na
+    f_row(dash, 2, "BASELINE", "non-369 hours", bBase, noBase, color.new(color.silver, 0))
+
+    // Explicit read of the comparison, in words, so the number that matters is
+    // not buried in a column.
+    string verdict = "insufficient data"
+    color  vcol    = color.new(color.gray, 30)
+    if bAll369.n >= minSample and bBase.n >= minSample
+        mb = f_mean(bBase.sRange, bBase.n)
+        ef = (not na(mb) and mb != 0) ? f_mean(bAll369.sRange, bAll369.n) / mb : na
+        db = f_rate(bAll369.bull, bAll369.n) - f_rate(bBase.bull, bBase.n)
+        if not na(ef)
+            verdict := "369 range " + str.tostring(ef, "#.##") + "x baseline,  bull rate " +
+                 str.tostring(db, "+#.#;-#.#") + " pts   (N " + str.tostring(bAll369.n) +
+                 " vs " + str.tostring(bBase.n) + ")"
+            vcol := (ef > 1.1 or ef < 0.9 or math.abs(db) > 5) ? color.new(color.teal, 10)
+                 : color.new(color.gray, 20)
+    for c = 0 to dashCols - 1
+        f_cell(dash, c, 3, "", color.new(color.gray, 100))
+    table.cell(dash, 0, 3, verdict, text_color = vcol, text_size = f_txtSize(statTextSize))
+    table.merge_cells(dash, 0, 3, dashCols - 1, 3)
+
+    f_cell(dash, 0, 4, "── per 369 hour ──", color.new(color.gray, 40))
+
+    for k = 0 to 7
+        hr = k * 3
+        f_row(dash, 5 + k, f_hh(hr) + ":00", f_modalSession(hr),
+             array.get(byHour, hr), bBase, color.new(color.silver, 0))
+
+    int nextRow = 13
+
+    if showRanking
+        f_cell(dash, 0, nextRow, "── ranking (VALID buckets only) ──", color.new(color.gray, 40))
+        nextRow += 1
+        for c = 0 to dashCols - 1
+            f_cell(dash, c, nextRow, "", color.new(color.gray, 100))
+        table.cell(dash, 0, nextRow, "by Rng/ATR:  " + f_rank("atr"),
+             text_color = color.new(color.silver, 10), text_size = f_txtSize(statTextSize))
+        table.merge_cells(dash, 0, nextRow, dashCols - 1, nextRow)
+        nextRow += 1
+        for c = 0 to dashCols - 1
+            f_cell(dash, c, nextRow, "", color.new(color.gray, 100))
+        table.cell(dash, 0, nextRow, "by dBull:    " + f_rank("bull"),
+             text_color = color.new(color.silver, 10), text_size = f_txtSize(statTextSize))
+        table.merge_cells(dash, 0, nextRow, dashCols - 1, nextRow)
+        nextRow += 1
+        for c = 0 to dashCols - 1
+            f_cell(dash, c, nextRow, "", color.new(color.gray, 100))
+        table.cell(dash, 0, nextRow, "by dBear:    " + f_rank("bear"),
+             text_color = color.new(color.silver, 10), text_size = f_txtSize(statTextSize))
+        table.merge_cells(dash, 0, nextRow, dashCols - 1, nextRow)
+        nextRow += 1
+
+    if showBySession
+        f_cell(dash, 0, nextRow, "── 369 hour x session ──", color.new(color.gray, 40))
+        nextRow += 1
+        for k = 0 to 7
+            hr = k * 3
+            for sx = 0 to 4
+                bk = array.get(byCombo, hr * 5 + sx)
+                if bk.n > 0
+                    f_row(dash, nextRow, f_hh(hr) + ":00", f_sessName(sx), bk, bBase,
+                         color.new(color.silver, 20))
+                    nextRow += 1
+
+    // Cleared here so the dashboard is rebuilt only when an hour actually
+    // closes. Realtime ticks inside the live hour redraw nothing and, more
+    // importantly, change nothing.
+    statsFresh := false
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 10 — INSPECTION TABLE (off by default)
+//  A read-only view of the Phase 5 data layer. Built once, refilled in place.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table stats = na
+
+if barstate.islast
+    if showTable
+        if na(stats)
+            stats := table.new(f_tablePos(tablePos), 7, tableRows + 1,
+                 border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 60))
+
+        table.cell(stats, 0, 0, "Window", text_color = color.gray, text_size = size.tiny)
+        table.cell(stats, 1, 0, "Dir",    text_color = color.gray, text_size = size.tiny)
+        table.cell(stats, 2, 0, "Range",  text_color = color.gray, text_size = size.tiny)
+        table.cell(stats, 3, 0, "Ticks",  text_color = color.gray, text_size = size.tiny)
+        table.cell(stats, 4, 0, "%",      text_color = color.gray, text_size = size.tiny)
+        table.cell(stats, 5, 0, "Bars",   text_color = color.gray, text_size = size.tiny)
+        table.cell(stats, 6, 0, "Session", text_color = color.gray, text_size = size.tiny)
+
+        row = 1
+        i   = array.size(windows) - 1
+        while i >= 0 and row <= tableRows
+            w = array.get(windows, i)
+            if not w.active
+                dc = w.dir == "Bullish" ? color.teal : w.dir == "Bearish" ? color.red : color.gray
+                table.cell(stats, 0, row, f_hourName(w.hourLocal),              text_color = color.silver, text_size = size.tiny)
+                table.cell(stats, 1, row, w.dir,                                text_color = dc,           text_size = size.tiny)
+                table.cell(stats, 2, row, str.tostring(w.rng, format.mintick),  text_color = color.silver, text_size = size.tiny)
+                table.cell(stats, 3, row, str.tostring(w.rngTicks, "#.#"),      text_color = color.silver, text_size = size.tiny)
+                table.cell(stats, 4, row, str.tostring(w.rngPct, "#.##"),       text_color = color.silver, text_size = size.tiny)
+                table.cell(stats, 5, row, str.tostring(w.barCount),             text_color = color.silver, text_size = size.tiny)
+                sTxt = w.sessMixed ? w.sessOpen + ">" + w.sessClose : w.sessOpen
+                table.cell(stats, 6, row, sTxt,                                 text_color = color.silver, text_size = size.tiny)
+                row += 1
+            i -= 1
+
+        // Blank any rows the history could not fill.
+        while row <= tableRows
+            for c = 0 to 6
+                table.cell(stats, c, row, "")
+            row += 1
+
+    else if not na(stats)
+        table.delete(stats)
+        stats := na
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SECTION 11 — TIMEFRAME NOTICE
+//  Says plainly what the chart can and cannot show, rather than drawing
+//  boxes that imply a precision the timeframe does not have.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var label warnLb = na
+
+if barstate.islast and enable369
+    string msg = ""
+    if warnTf
+        if not timeframe.isintraday
+            msg := "369 Matrix: needs an intraday timeframe (1m-60m). Blocks are off."
+        else if tfSec > 3600
+            msg := "369 Matrix: " + timeframe.period + " bars are longer than one hour, so a bar " +
+                 "cannot be assigned to a single 369 window. Blocks are off - use 60m or lower."
+        else if not aligned
+            msg := "369 Matrix: " + timeframe.period + " bars do not divide evenly into an hour, so " +
+                 "block edges snap to bar boundaries instead of exact :00. Use 1/2/3/5/6/10/12/15/20/30/60m."
+
+    if msg != ""
+        if na(warnLb)
+            warnLb := label.new(bar_index, high, msg,
+                 style     = label.style_label_left,
+                 color     = color.new(color.orange, 85),
+                 textcolor = color.orange,
+                 size      = size.small)
+        label.set_xy(warnLb, bar_index, high)
+        label.set_text(warnLb, msg)
+    else if not na(warnLb)
+        label.delete(warnLb)
+        warnLb := na
+
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE — DELTA ZONES BUY/SELL PRESSURE (no ZigZag)
+// ══════════════════════════════════════════════════════════════════════════
+
+// ╔══════════════════════════════════════════════════════════╗
+// ║  1. DELTA ZONES — General Settings                       ║
+// ╚══════════════════════════════════════════════════════════╝
+stddevlevel    = input.float(title='Standard Deviation',          defval=3.5, step=0.5, group="1. Delta Zones — General")
+stddevlookback = input.int  (title='Standard Deviation Lookback', defval=20,            group="1. Delta Zones — General")
+
+// ╔══════════════════════════════════════════════════════════╗
+// ║  2. DELTA ZONES — Current TF Boxes                       ║
+// ╚══════════════════════════════════════════════════════════╝
+showBuyBoxes       = input.bool (title='Show Buy Boxes',              defval=false,  group="2. Delta Zones — Current TF Boxes")
+showSellBoxes      = input.bool (title='Show Sell Boxes',             defval=false,  group="2. Delta Zones — Current TF Boxes")
+buyBoxColor        = input.color(title='Buy Fill Color',              defval=color.new(color.green, 83), group="2. Delta Zones — Current TF Boxes")
+sellBoxColor       = input.color(title='Sell Fill Color',             defval=color.new(color.red,   83), group="2. Delta Zones — Current TF Boxes")
+buyBoxBorderColor  = input.color(title='Buy Border Color',            defval=color.green,               group="2. Delta Zones — Current TF Boxes")
+sellBoxBorderColor = input.color(title='Sell Border Color',           defval=color.red,                 group="2. Delta Zones — Current TF Boxes")
+boxBorderWidth     = input.int  (title='Border Width',                defval=1, minval=1, maxval=5,     group="2. Delta Zones — Current TF Boxes")
+maxCurrentBoxes    = input.int  (title='Max Boxes Visible',           defval=3,  minval=1, maxval=20,   group="2. Delta Zones — Current TF Boxes")
+deleteOnClose      = input.bool (title='Delete Box When Price Breaks Zone', defval=false, group="2. Delta Zones — Current TF Boxes")
+
+// ╔══════════════════════════════════════════════════════════╗
+// ║  3. HIGHER TIMEFRAME (HTF) — Activation                  ║
+// ╚══════════════════════════════════════════════════════════╝
+showHTFBoxes     = input.bool     (title='Enable HTF Boxes',          defval=false, group="3. HTF Boxes — Activation")
+htfTimeframe     = input.timeframe(title='Higher Timeframe',          defval="60",  group="3. HTF Boxes — Activation")
+hideCurrentOnHTF = input.bool     (title='Hide Current TF Boxes When HTF Active', defval=true, group="3. HTF Boxes — Activation")
+
+// ╔══════════════════════════════════════════════════════════╗
+// ║  4. HIGHER TIMEFRAME (HTF) — Appearance                  ║
+// ╚══════════════════════════════════════════════════════════╝
+htfBuyBorderColor  = input.color(title='HTF Buy Border Color',  defval=color.new(color.aqua,   0),  group="4. HTF Boxes — Appearance")
+htfSellBorderColor = input.color(title='HTF Sell Border Color', defval=color.new(color.orange, 0),  group="4. HTF Boxes — Appearance")
+htfBuyFillColor    = input.color(title='HTF Buy Fill Color',    defval=color.new(color.aqua,   92), group="4. HTF Boxes — Appearance")
+htfSellFillColor   = input.color(title='HTF Sell Fill Color',   defval=color.new(color.orange, 92), group="4. HTF Boxes — Appearance")
+htfBorderWidth     = input.int  (title='HTF Border Width',      defval=2, minval=1, maxval=5,       group="4. HTF Boxes — Appearance")
+showHTFLabels      = input.bool (title='Show HTF Labels',       defval=true,  group="4. HTF Boxes — Appearance")
+maxHTFBoxes        = input.int  (title='Max HTF Boxes Visible', defval=2, minval=1, maxval=10,      group="4. HTF Boxes — Appearance")
+
+
+// ══════════════════════════════════════════════════════════
+//  TIMEFRAME VALIDATION
+//  HTF must be strictly GREATER than the chart timeframe.
+//  If not, HTF boxes are silently ignored.
+// ══════════════════════════════════════════════════════════
+currentTFsec = timeframe.in_seconds(timeframe.period)
+htfSec       = timeframe.in_seconds(htfTimeframe)
+htfIsValid   = htfSec > currentTFsec
+
+// HTF boxes are only drawn if htfIsValid (HTF > current TF). If equal or lower, they are silently ignored.
+
+// ══════════════════════════════════════════════════════════
+//  DELTA FUNCTION
+// ══════════════════════════════════════════════════════════
+deltaHunting(lvl, lbk) =>
+    _up_d  = (open - low)  - (high - close)
+    _dn_d  = (high - open) - (close - low)
+    _delta = _up_d != 0 ? _up_d : _dn_d != 0 ? _dn_d : na
+    _pos   = _delta > 0 ? _delta : na
+    _neg   = _delta < 0 ? _delta : na
+    _hup   = _pos >= ta.stdev(_pos, lbk) * lvl
+    _hdn   = _neg <= ta.stdev(_neg, lbk) * -lvl
+    _buyTop  = open <= close ? (open + low) / 2 : (close + low) / 2
+    _buyBot  = low
+    _sellTop = high
+    _sellBot = open < close ? (close + high) / 2 : (open + high) / 2
+    [_hup, _hdn, _buyTop, _buyBot, _sellTop, _sellBot]
+
+// ══════════════════════════════════════════════════════════
+//  DELTA — CURRENT TF AND HTF
+// ══════════════════════════════════════════════════════════
+[huntingup, huntingdn, buyTop, buyBot, sellTop, sellBot] = deltaHunting(stddevlevel, stddevlookback)
+[htf_hup, htf_hdn, htf_buyTop, htf_buyBot, htf_sellTop, htf_sellBot] = request.security(syminfo.tickerid, htfTimeframe, deltaHunting(stddevlevel, stddevlookback), lookahead=barmerge.lookahead_off)
+
+// ══════════════════════════════════════════════════════════
+//  HELPER — removes oldest box when limit is exceeded
+// ══════════════════════════════════════════════════════════
+pruneBoxes(boxArr, topArr, botArr, maxCount) =>
+    while array.size(boxArr) > maxCount
+        box.delete(array.shift(boxArr))
+        array.shift(topArr)
+        array.shift(botArr)
+
+// ══════════════════════════════════════════════════════════
+//  BOXES — CURRENT TF
+//  Deleted when price closes beyond the zone
+// ══════════════════════════════════════════════════════════
+var box[]   curBuyBoxes  = array.new<box>()
+var box[]   curSellBoxes = array.new<box>()
+var float[] curBuyTops   = array.new<float>()
+var float[] curBuyBots   = array.new<float>()
+var float[] curSellTops  = array.new<float>()
+var float[] curSellBots  = array.new<float>()
+
+// Buy boxes current TF — deleted when price closes BELOW the bottom
+// If hideCurrentOnHTF is active and HTF is valid, they are not drawn
+showCurrentBoxes = not (hideCurrentOnHTF and showHTFBoxes and htfIsValid)
+if enableDeltaZones and showBuyBoxes and showCurrentBoxes
+    if huntingup
+        array.push(curBuyBoxes, box.new(left=bar_index, top=buyTop, right=bar_index + 5, bottom=buyBot, bgcolor=buyBoxColor, border_width=boxBorderWidth, border_color=buyBoxBorderColor))
+        array.push(curBuyTops, buyTop)
+        array.push(curBuyBots, buyBot)
+        pruneBoxes(curBuyBoxes, curBuyTops, curBuyBots, maxCurrentBoxes)
+    else if array.size(curBuyBoxes) > 0
+        i = array.size(curBuyBoxes) - 1
+        while i >= 0
+            if deleteOnClose and close < array.get(curBuyBots, i)
+                box.delete(array.get(curBuyBoxes, i))
+                array.remove(curBuyBoxes, i)
+                array.remove(curBuyTops, i)
+                array.remove(curBuyBots, i)
+            else
+                box.set_right(array.get(curBuyBoxes, i), bar_index + 5)
+            i -= 1
+
+// Sell boxes current TF — deleted when price closes ABOVE the top
+if enableDeltaZones and showSellBoxes and showCurrentBoxes
+    if huntingdn
+        array.push(curSellBoxes, box.new(left=bar_index, top=sellTop, right=bar_index + 5, bottom=sellBot, bgcolor=sellBoxColor, border_width=boxBorderWidth, border_color=sellBoxBorderColor))
+        array.push(curSellTops, sellTop)
+        array.push(curSellBots, sellBot)
+        pruneBoxes(curSellBoxes, curSellTops, curSellBots, maxCurrentBoxes)
+    else if array.size(curSellBoxes) > 0
+        i = array.size(curSellBoxes) - 1
+        while i >= 0
+            if deleteOnClose and close > array.get(curSellTops, i)
+                box.delete(array.get(curSellBoxes, i))
+                array.remove(curSellBoxes, i)
+                array.remove(curSellTops, i)
+                array.remove(curSellBots, i)
+            else
+                box.set_right(array.get(curSellBoxes, i), bar_index + 5)
+            i -= 1
+
+// ══════════════════════════════════════════════════════════
+//  BOXES — HTF
+//  Only drawn if htfIsValid (HTF strictly > current TF)
+//  Distinct visual: near-transparent fill + thick solid border
+//  Deleted when price closes beyond the zone
+// ══════════════════════════════════════════════════════════
+var box[]   htfBuyBoxes  = array.new<box>()
+var box[]   htfSellBoxes = array.new<box>()
+var float[] htfBuyTops   = array.new<float>()
+var float[] htfBuyBots   = array.new<float>()
+var float[] htfSellTops  = array.new<float>()
+var float[] htfSellBots  = array.new<float>()
+
+htfBuyNew  = enableDeltaZones and showHTFBoxes and htfIsValid and showBuyBoxes  and htf_hup and not htf_hup[1]
+htfSellNew = enableDeltaZones and showHTFBoxes and htfIsValid and showSellBoxes and htf_hdn and not htf_hdn[1]
+
+// Create new HTF Buy box
+if htfBuyNew
+    array.push(htfBuyBoxes, box.new(left=bar_index, top=htf_buyTop, right=bar_index + 500, bottom=htf_buyBot, bgcolor=htfBuyFillColor, border_width=htfBorderWidth, border_color=htfBuyBorderColor))
+    array.push(htfBuyTops, htf_buyTop)
+    array.push(htfBuyBots, htf_buyBot)
+    pruneBoxes(htfBuyBoxes, htfBuyTops, htfBuyBots, maxHTFBoxes)
+    if showHTFLabels
+        label.new(x=bar_index, y=htf_buyBot, text="▲ " + htfTimeframe + "m BUY", style=label.style_label_upper_right, color=htfBuyBorderColor, textcolor=color.black, size=size.small)
+
+// Create new HTF Sell box
+if htfSellNew
+    array.push(htfSellBoxes, box.new(left=bar_index, top=htf_sellTop, right=bar_index + 500, bottom=htf_sellBot, bgcolor=htfSellFillColor, border_width=htfBorderWidth, border_color=htfSellBorderColor))
+    array.push(htfSellTops, htf_sellTop)
+    array.push(htfSellBots, htf_sellBot)
+    pruneBoxes(htfSellBoxes, htfSellTops, htfSellBots, maxHTFBoxes)
+    if showHTFLabels
+        label.new(x=bar_index, y=htf_sellTop, text="▼ " + htfTimeframe + "m SELL", style=label.style_label_lower_right, color=htfSellBorderColor, textcolor=color.black, size=size.small)
+
+// Manage active HTF Buy boxes
+// Deleted when price CLOSES BELOW the bottom (zone broken to the downside)
+if array.size(htfBuyBoxes) > 0
+    i = array.size(htfBuyBoxes) - 1
+    while i >= 0
+        breached = deleteOnClose and close < array.get(htfBuyBots, i)
+        if breached
+            box.delete(array.get(htfBuyBoxes, i))
+            array.remove(htfBuyBoxes, i)
+            array.remove(htfBuyTops, i)
+            array.remove(htfBuyBots, i)
+        else
+            box.set_right(array.get(htfBuyBoxes, i), bar_index + 1)
+        i -= 1
+
+// Manage active HTF Sell boxes
+// Deleted when price CLOSES ABOVE the top (zone broken to the upside)
+if array.size(htfSellBoxes) > 0
+    i = array.size(htfSellBoxes) - 1
+    while i >= 0
+        breached = deleteOnClose and close > array.get(htfSellTops, i)
+        if breached
+            box.delete(array.get(htfSellBoxes, i))
+            array.remove(htfSellBoxes, i)
+            array.remove(htfSellTops, i)
+            array.remove(htfSellBots, i)
+        else
+            box.set_right(array.get(htfSellBoxes, i), bar_index + 1)
+        i -= 1
+
+// ══════════════════════════════════════════════════════════
+//  ARROWS
+// ══════════════════════════════════════════════════════════
+plotshape(series=enableDeltaZones and showBuyBoxes and huntingup,   location=location.belowbar, color=color.green, style=shape.triangleup,   size=size.tiny, title="Buy Pressure")
+plotshape(series=enableDeltaZones and showSellBoxes and huntingdn,  location=location.abovebar, color=color.red,   style=shape.triangledown, size=size.tiny, title="Sell Pressure")
+
+// ══════════════════════════════════════════════════════════
+//  ALERTS
+// ══════════════════════════════════════════════════════════
+
+// End of script.
+
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE — ALL CANDLESTICK PATTERNS (curated — 14 of ~40)
+// ══════════════════════════════════════════════════════════════════════════
+
+C_DownTrend = true
+C_UpTrend = true
+var cdlTrendRule1 = "SMA50"
+var cdlTrendRule2 = "SMA50, SMA200"
+
+var cdlTrendRule = input.string(cdlTrendRule1, "Detect Trend Based On", options=[cdlTrendRule1, cdlTrendRule2, "No detection"], group = "All Candlestick Patterns")
+
+if cdlTrendRule == cdlTrendRule1
+	cdlPriceAvg = ta.sma(close, 50)
+	C_DownTrend := close < cdlPriceAvg
+	C_UpTrend := close > cdlPriceAvg
+
+if cdlTrendRule == cdlTrendRule2
+	cdlSma200 = ta.sma(close, 200)
+	cdlSma50 = ta.sma(close, 50)
+	C_DownTrend := close < cdlSma50 and cdlSma50 < cdlSma200
+	C_UpTrend := close > cdlSma50 and cdlSma50 > cdlSma200
+C_Len = 14 // ta.ema depth for bodyAvg
+C_ShadowPercent = 5.0 // size of shadows
+C_ShadowEqualsPercent = 100.0
+C_DojiBodyPercent = 5.0
+C_Factor = 2.0 // shows the number of times the shadow dominates the candlestick body
+
+C_BodyHi = math.max(close, open)
+C_BodyLo = math.min(close, open)
+C_Body = C_BodyHi - C_BodyLo
+C_BodyAvg = ta.ema(C_Body, C_Len)
+C_SmallBody = C_Body < C_BodyAvg
+C_LongBody = C_Body > C_BodyAvg
+C_UpShadow = high - C_BodyHi
+C_DnShadow = C_BodyLo - low
+C_HasUpShadow = C_UpShadow > C_ShadowPercent / 100 * C_Body
+C_HasDnShadow = C_DnShadow > C_ShadowPercent / 100 * C_Body
+C_WhiteBody = open < close
+C_BlackBody = open > close
+C_Range = high-low
+C_IsInsideBar = C_BodyHi[1] > C_BodyHi and C_BodyLo[1] < C_BodyLo
+C_BodyMiddle = C_Body / 2 + C_BodyLo
+C_ShadowEquals = C_UpShadow == C_DnShadow or (math.abs(C_UpShadow - C_DnShadow) / C_DnShadow * 100) < C_ShadowEqualsPercent and (math.abs(C_DnShadow - C_UpShadow) / C_UpShadow * 100) < C_ShadowEqualsPercent
+C_IsDojiBody = C_Range > 0 and C_Body <= C_Range * C_DojiBodyPercent / 100
+C_Doji = C_IsDojiBody and C_ShadowEquals
+
+cdlLabelPosLow = low - (ta.atr(30) * 0.6)
+cdlLabelPosHigh = high + (ta.atr(30) * 0.6)
+cdl_label_color_bullish = input(color.blue, "Label Color Bullish", group = "All Candlestick Patterns")
+cdl_label_color_bearish = input(color.red, "Label Color Bearish", group = "All Candlestick Patterns")
+cdl_label_color_neutral = input(color.gray, "Label Color Neutral", group = "All Candlestick Patterns")
+cdlCandleType = input.string(title = "Pattern Type", defval="Both", options=["Bullish", "Bearish", "Both"], group = "All Candlestick Patterns")
+
+AbandonedBabyInput = input(title = "Abandoned Baby" ,defval=false, group = "All Candlestick Patterns")
+
+DarkCloudCoverInput = input(title = "Dark Cloud Cover" ,defval=false, group = "All Candlestick Patterns")
+
+DojiInput = input(title = "Doji" ,defval=false, group = "All Candlestick Patterns")
+
+DragonflyDojiInput = input(title = "Dragonfly Doji" ,defval=false, group = "All Candlestick Patterns")
+
+EngulfingInput = input(title = "Engulfing" ,defval=false, group = "All Candlestick Patterns")
+
+EveningStarInput = input(title = "Evening Star" ,defval=false, group = "All Candlestick Patterns")
+
+HammerInput = input(title = "Hammer" ,defval=false, group = "All Candlestick Patterns")
+
+HangingManInput = input(title = "Hanging Man" ,defval=false, group = "All Candlestick Patterns")
+
+HaramiInput = input(title = "Harami" ,defval=false, group = "All Candlestick Patterns")
+
+MorningStarInput = input(title = "Morning Star" ,defval=false, group = "All Candlestick Patterns")
+
+PiercingInput = input(title = "Piercing" ,defval=false, group = "All Candlestick Patterns")
+
+ShootingStarInput = input(title = "Shooting Star" ,defval=false, group = "All Candlestick Patterns")
+
+ThreeBlackCrowsInput = input(title = "Three Black Crows" ,defval=false, group = "All Candlestick Patterns")
+
+ThreeWhiteSoldiersInput = input(title = "Three White Soldiers" ,defval=false, group = "All Candlestick Patterns")
+
+C_DarkCloudCoverBearishNumberOfCandles = 2
+C_DarkCloudCoverBearish = false
+if (C_UpTrend[1] and C_WhiteBody[1] and C_LongBody[1]) and (C_BlackBody and open >= high[1] and  close < C_BodyMiddle[1] and close > open[1])
+	C_DarkCloudCoverBearish := true
+if enableCandles and C_DarkCloudCoverBearish  and  DarkCloudCoverInput and (("Bearish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBearishDarkCloudCover = "Dark Cloud Cover\nDark Cloud Cover is a two-candle bearish reversal candlestick pattern found in an uptrend. The first candle is green and has a larger than average body. The second candle is red and opens above the high of the prior candle, creating a gap, and then closes below the midpoint of the first candle. The pattern shows a possible shift in the momentum from the upside to the downside, indicating that a reversal might happen soon."
+    label.new(bar_index, cdlLabelPosHigh, text="DCC", style=label.style_label_down, color = cdl_label_color_bearish, textcolor=color.white, tooltip = ttBearishDarkCloudCover)
+C_PiercingBullishNumberOfCandles = 2
+C_PiercingBullish = false
+if (C_DownTrend[1] and C_BlackBody[1] and C_LongBody[1]) and (C_WhiteBody and open <= low[1] and close > C_BodyMiddle[1] and close < open[1])
+	C_PiercingBullish := true
+if enableCandles and C_PiercingBullish  and  PiercingInput and (("Bullish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBullishPiercing = "Piercing\nPiercing is a two-candle bullish reversal candlestick pattern found in a downtrend. The first candle is red and has a larger than average body. The second candle is green and opens below the low of the prior candle, creating a gap, and then closes above the midpoint of the first candle. The pattern shows a possible shift in the momentum from the downside to the upside, indicating that a reversal might happen soon."
+    label.new(bar_index, cdlLabelPosLow, text="P", style=label.style_label_up, color = cdl_label_color_bullish, textcolor=color.white, tooltip = ttBullishPiercing)
+C_HammerBullishNumberOfCandles = 1
+C_HammerBullish = false
+if C_SmallBody and C_Body > 0 and C_BodyLo > hl2 and C_DnShadow >= C_Factor * C_Body and not C_HasUpShadow
+    if C_DownTrend
+        C_HammerBullish := true
+if enableCandles and C_HammerBullish  and  HammerInput and (("Bullish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBullishHammer = "Hammer\nHammer candlesticks form when a security moves lower after the open, but continues to rally into close above the intraday low. The candlestick that you are left with will look like a square attached to a long stick-like figure. This candlestick is called a Hammer if it happens to form during a decline."
+    label.new(bar_index, cdlLabelPosLow, text="H", style=label.style_label_up, color = cdl_label_color_bullish, textcolor=color.white, tooltip = ttBullishHammer)
+C_HangingManBearishNumberOfCandles = 1
+C_HangingManBearish = false
+if C_SmallBody and C_Body > 0 and C_BodyLo > hl2 and C_DnShadow >= C_Factor * C_Body and not C_HasUpShadow
+	if C_UpTrend
+	    C_HangingManBearish := true
+if enableCandles and C_HangingManBearish  and  HangingManInput and (("Bearish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBearishHangingMan = "Hanging Man\nWhen a specified security notably moves lower after the open, but continues to rally to close above the intraday low, a Hanging Man candlestick will form. The candlestick will resemble a square, attached to a long stick-like figure. It is referred to as a Hanging Man if the candlestick forms during an advance."
+    label.new(bar_index, cdlLabelPosHigh, text="HM", style=label.style_label_down, color = cdl_label_color_bearish, textcolor=color.white, tooltip = ttBearishHangingMan)
+C_ShootingStarBearishNumberOfCandles = 1
+C_ShootingStarBearish = false
+if C_SmallBody and C_Body > 0 and C_BodyHi < hl2 and C_UpShadow >= C_Factor * C_Body and not C_HasDnShadow
+	if C_UpTrend
+	    C_ShootingStarBearish := true
+if enableCandles and C_ShootingStarBearish  and  ShootingStarInput and (("Bearish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBearishShootingStar = "Shooting Star\nThis single day pattern can appear during an uptrend and opens high, while it closes near its open. It trades much higher as well. It is bearish in nature, but looks like an Inverted Hammer."
+    label.new(bar_index, cdlLabelPosHigh, text="SS", style=label.style_label_down, color = cdl_label_color_bearish, textcolor=color.white, tooltip = ttBearishShootingStar)
+C_MorningStarBullishNumberOfCandles = 3
+C_MorningStarBullish = false
+if C_LongBody[2] and C_SmallBody[1] and C_LongBody
+    if C_DownTrend and C_BlackBody[2] and C_BodyHi[1] < C_BodyLo[2] and C_WhiteBody and C_BodyHi >= C_BodyMiddle[2] and C_BodyHi < C_BodyHi[2] and C_BodyHi[1] < C_BodyLo
+        C_MorningStarBullish := true
+if enableCandles and C_MorningStarBullish  and  MorningStarInput and (("Bullish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBullishMorningStar = "Morning Star\nA three-day bullish reversal pattern, which consists of three candlesticks will look something like this: The first being a long-bodied red candle that extends the current downtrend. Next comes a short, middle candle that gaps down on the open. After comes a long-bodied green candle, which gaps up on the open and closes above the midpoint of the body of the first day."
+    label.new(bar_index, cdlLabelPosLow, text="MS", style=label.style_label_up, color = cdl_label_color_bullish, textcolor=color.white, tooltip = ttBullishMorningStar)
+C_EveningStarBearishNumberOfCandles = 3
+C_EveningStarBearish = false
+if C_LongBody[2] and C_SmallBody[1] and C_LongBody
+    if C_UpTrend and C_WhiteBody[2] and C_BodyLo[1] > C_BodyHi[2] and C_BlackBody and C_BodyLo <= C_BodyMiddle[2] and C_BodyLo > C_BodyLo[2] and C_BodyLo[1] > C_BodyHi
+        C_EveningStarBearish := true
+if enableCandles and C_EveningStarBearish  and  EveningStarInput and (("Bearish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBearishEveningStar = "Evening Star\nThis candlestick pattern is bearish and continues an uptrend with a long-bodied, green candle day. It is then followed by a gapped and small-bodied candle day, and concludes with a downward close. The close would be below the first day’s midpoint."
+    label.new(bar_index, cdlLabelPosHigh, text="ES", style=label.style_label_down, color = cdl_label_color_bearish, textcolor=color.white, tooltip = ttBearishEveningStar)
+C_DojiNumberOfCandles = 1
+C_DragonflyDoji = C_IsDojiBody and C_UpShadow <= C_Body
+C_GravestoneDojiOne = C_IsDojiBody and C_DnShadow <= C_Body
+if enableCandles and C_Doji and not C_DragonflyDoji and not C_GravestoneDojiOne and DojiInput
+    var ttDoji = "Doji\nWhen the open and close of a security are essentially equal to each other, a doji candle forms. The length of both upper and lower shadows may vary, causing the candlestick you are left with to either resemble a cross, an inverted cross, or a plus sign. Doji candles show the playout of buyer-seller indecision in a tug-of-war of sorts. As price moves either above or below the opening level during the session, the close is either at or near the opening level."
+    label.new(bar_index, cdlLabelPosLow, text="D", style=label.style_label_up, color = cdl_label_color_neutral, textcolor=color.white, tooltip = ttDoji)
+C_DragonflyDojiBullishNumberOfCandles = 1
+C_DragonflyDojiBullish = C_IsDojiBody and C_UpShadow <= C_Body
+if enableCandles and C_DragonflyDojiBullish  and  DragonflyDojiInput and (("Bullish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBullishDragonflyDoji = "Dragonfly Doji\nSimilar to other Doji days, this particular Doji also regularly appears at pivotal market moments. This is a specific Doji where both the open and close price are at the high of a given day."
+    label.new(bar_index, cdlLabelPosLow, text="DD", style=label.style_label_up, color = cdl_label_color_bullish, textcolor=color.white, tooltip = ttBullishDragonflyDoji)
+C_HaramiBullishNumberOfCandles = 2
+C_HaramiBullish = C_LongBody[1] and C_BlackBody[1] and C_DownTrend[1] and C_WhiteBody and C_SmallBody and high <= C_BodyHi[1] and low >= C_BodyLo[1]
+if enableCandles and C_HaramiBullish  and  HaramiInput and (("Bullish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBullishHarami = "Harami\nThis two-day candlestick pattern consists of a small-bodied green candle that is entirely encompassed within the body of what was once a red-bodied candle."
+    label.new(bar_index, cdlLabelPosLow, text="BH", style=label.style_label_up, color = cdl_label_color_bullish, textcolor=color.white, tooltip = ttBullishHarami)
+C_HaramiBearishNumberOfCandles = 2
+C_HaramiBearish = C_LongBody[1] and C_WhiteBody[1] and C_UpTrend[1] and C_BlackBody and C_SmallBody and high <= C_BodyHi[1] and low >= C_BodyLo[1]
+if enableCandles and C_HaramiBearish  and  HaramiInput and (("Bearish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBearishHarami = "Harami\nThis is a two-day candlestick pattern with a small, red-bodied candle that is entirely encompassed within the body that was once a green-bodied candle."
+    label.new(bar_index, cdlLabelPosHigh, text="BH", style=label.style_label_down, color = cdl_label_color_bearish, textcolor=color.white, tooltip = ttBearishHarami)
+C_ThreeWhiteSoldiersBullishNumberOfCandles = 3
+C_3WSld_ShadowPercent = 5.0
+C_3WSld_HaveNotUpShadow = C_Range * C_3WSld_ShadowPercent / 100 > C_UpShadow
+C_ThreeWhiteSoldiersBullish = false
+if C_LongBody and C_LongBody[1] and C_LongBody[2]
+    if C_WhiteBody and C_WhiteBody[1] and C_WhiteBody[2]
+        C_ThreeWhiteSoldiersBullish := close > close[1] and close[1] > close[2] and open < close[1] and open > open[1] and open[1] < close[2] and open[1] > open[2] and C_3WSld_HaveNotUpShadow and C_3WSld_HaveNotUpShadow[1] and C_3WSld_HaveNotUpShadow[2]
+if enableCandles and C_ThreeWhiteSoldiersBullish  and  ThreeWhiteSoldiersInput and (("Bullish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBullishThreeWhiteSoldiers = "Three White Soldiers\nThis bullish reversal pattern is made up of three long-bodied, green candles in immediate succession. Each one opens within the body before it and the close is near to the daily high."
+    label.new(bar_index, cdlLabelPosLow, text="3WS", style=label.style_label_up, color = cdl_label_color_bullish, textcolor=color.white, tooltip = ttBullishThreeWhiteSoldiers)
+C_ThreeBlackCrowsBearishNumberOfCandles = 3
+C_3BCrw_ShadowPercent = 5.0
+C_3BCrw_HaveNotDnShadow = C_Range * C_3BCrw_ShadowPercent / 100 > C_DnShadow
+C_ThreeBlackCrowsBearish = false
+if C_LongBody and C_LongBody[1] and C_LongBody[2]
+    if C_BlackBody and C_BlackBody[1] and C_BlackBody[2]
+        C_ThreeBlackCrowsBearish := close < close[1] and close[1] < close[2] and open > close[1] and open < open[1] and open[1] > close[2] and open[1] < open[2] and C_3BCrw_HaveNotDnShadow and C_3BCrw_HaveNotDnShadow[1] and C_3BCrw_HaveNotDnShadow[2]
+if enableCandles and C_ThreeBlackCrowsBearish  and  ThreeBlackCrowsInput and (("Bearish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBearishThreeBlackCrows = "Three Black Crows\nThis is a bearish reversal pattern that consists of three long, red-bodied candles in immediate succession. For each of these candles, each day opens within the body of the day before and closes either at or near its low."
+    label.new(bar_index, cdlLabelPosHigh, text="3BC", style=label.style_label_down, color = cdl_label_color_bearish, textcolor=color.white, tooltip = ttBearishThreeBlackCrows)
+C_EngulfingBullishNumberOfCandles = 2
+C_EngulfingBullish = C_DownTrend and C_WhiteBody and C_LongBody and C_BlackBody[1] and C_SmallBody[1] and close >= open[1] and open <= close[1] and ( close > open[1] or open < close[1] )
+if enableCandles and C_EngulfingBullish  and  EngulfingInput and (("Bullish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBullishEngulfing = "Engulfing\nAt the end of a given downward trend, there will most likely be a reversal pattern. To distinguish the first day, this candlestick pattern uses a small body, followed by a day where the candle body fully overtakes the body from the day before, and closes in the trend’s opposite direction. Although similar to the outside reversal chart pattern, it is not essential for this pattern to completely overtake the range (high to low), rather only the open and the close."
+    label.new(bar_index, cdlLabelPosLow, text="BE", style=label.style_label_up, color = cdl_label_color_bullish, textcolor=color.white, tooltip = ttBullishEngulfing)
+C_EngulfingBearishNumberOfCandles = 2
+C_EngulfingBearish = C_UpTrend and C_BlackBody and C_LongBody and C_WhiteBody[1] and C_SmallBody[1] and close <= open[1] and open >= close[1] and ( close < open[1] or open > close[1] )
+if enableCandles and C_EngulfingBearish  and  EngulfingInput and (("Bearish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBearishEngulfing = "Engulfing\nAt the end of a given uptrend, a reversal pattern will most likely appear. During the first day, this candlestick pattern uses a small body. It is then followed by a day where the candle body fully overtakes the body from the day before it and closes in the trend’s opposite direction. Although similar to the outside reversal chart pattern, it is not essential for this pattern to fully overtake the range (high to low), rather only the open and the close."
+    label.new(bar_index, cdlLabelPosHigh, text="BE", style=label.style_label_down, color = cdl_label_color_bearish, textcolor=color.white, tooltip = ttBearishEngulfing)
+C_AbandonedBabyBullishNumberOfCandles = 3
+C_AbandonedBabyBullish = C_DownTrend[2] and C_BlackBody[2] and C_IsDojiBody[1] and low[2] > high[1] and C_WhiteBody and high[1] < low
+if enableCandles and C_AbandonedBabyBullish  and  AbandonedBabyInput and (("Bullish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBullishAbandonedBaby = "Abandoned Baby\nThis candlestick pattern is quite rare as far as reversal patterns go. The first of the pattern is a large down candle. Next comes a doji candle that gaps below the candle before it. The doji candle is then followed by another candle that opens even higher and swiftly moves to the upside."
+    label.new(bar_index, cdlLabelPosLow, text="AB", style=label.style_label_up, color = cdl_label_color_bullish, textcolor=color.white, tooltip = ttBullishAbandonedBaby)
+C_AbandonedBabyBearishNumberOfCandles = 3
+C_AbandonedBabyBearish = C_UpTrend[2] and C_WhiteBody[2] and C_IsDojiBody[1] and high[2] < low[1] and C_BlackBody and low[1] > high
+if enableCandles and C_AbandonedBabyBearish  and  AbandonedBabyInput and (("Bearish" == cdlCandleType) or cdlCandleType == "Both")
+
+    var ttBearishAbandonedBaby = "Abandoned Baby\nA bearish abandoned baby is a specific candlestick pattern that often signals a downward reversal trend in terms of security price. It is formed when a gap appears between the lowest price of a doji-like candle and the candlestick of the day before. The earlier candlestick is green, tall, and has small shadows. The doji candle is also tailed by a gap between its lowest price point and the highest price point of the candle that comes next, which is red, tall and also has small shadows. The doji candle shadows must completely gap either below or above the shadows of the first and third day in order to have the abandoned baby pattern effect."
+    label.new(bar_index, cdlLabelPosHigh, text="AB", style=label.style_label_down, color = cdl_label_color_bearish, textcolor=color.white, tooltip = ttBearishAbandonedBaby)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE — ATR SL/TP TABLE
+// ══════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONCEPT
+// The ATR is not plotted as a line. Two stop methods are available:
+//   • Exec ATR × Mult (default): SL = entry ± (execution-TF ATR × multiplier),
+//     e.g. 1.5× the 5m ATR from the entry — behind the absorption wick.
+//   • HTF Structure: SL beyond the most recent 1H swing on the correct side
+//     of the entry, with an ATR buffer.
+// TP1/TP2/TP3 are projected from the entry using your R:R multiples, and the
+// position size is calculated so a stop-out loses a fixed % of the account.
+//
+// MANUAL TRADE MODE
+// Adding the indicator drops you into a one-click placement (confirm=true):
+// click once on the chart at your entry and that sets both the entry PRICE
+// and the entry TIME — no typing digits, no typing a date, no hunting for a
+// line at 0. The line and time marker are draggable afterward to fine-tune.
+// The table then calculates from YOUR entry and direction. Untick "Use manual
+// entry" to fall back to the automatic EMA bias / current price.
+// scale=scale.none keeps the placed line from ever changing your chart zoom.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── ATR ──────────────────────────────────────────────────────────────────────
+
+grpAtr    = "ATR"
+sltpAtrLen    = input.int(14, "Length", minval=1, group=grpAtr)
+smoothing = input.string("RMA", "Smoothing", options=["RMA", "SMA", "EMA", "WMA"], group=grpAtr)
+atrTf     = input.timeframe("60", "ATR / Structure Timeframe", group=grpAtr, tooltip="ATR, trend EMA and swing highs/lows are all calculated on this timeframe regardless of your chart timeframe. Default = 1H.")
+
+// ── Manual trade ─────────────────────────────────────────────────────────────
+grpMan   = "Manual Trade"
+useMan   = input.bool(true, "Use manual entry", group=grpMan, tooltip="Overrides the auto bias so the table calculates SL/TPs from your placed entry price and the direction below. Untick to ignore the placed entry and use the automatic EMA bias / current price instead.")
+manEntry = input.price(0.0, "Entry price", group=grpMan, confirm=true, tooltip="On adding the indicator you are asked to click once on the chart — that click sets this entry price (and the entry time below) at that point, so nothing is typed and there is no line to hunt for. Drag the line afterward to fine-tune. Ignored (auto bias used) while it is 0.")
+manTime  = input.time(0, "Entry time", group=grpMan, confirm=true, tooltip="Set by the same click that places the entry price. Used by the freeze option below. Drag the vertical marker to change it.")
+manDir   = input.string("Buy", "Direction", options=["Buy", "Sell"], group=grpMan)
+freezeAtEntry = input.bool(true, "Freeze levels at entry time", group=grpMan, tooltip="On: lock the ATR / swing / SL at the entry bar so they stop moving as new bars print (best for a trade you're already in). Off: keep the levels live off the latest bar (best for planning).")
+
+// ── Stop loss ────────────────────────────────────────────────────────────────
+grpSl    = "Stop Loss"
+slMode   = input.string("Exec ATR × Mult", "SL Method", options=["Exec ATR × Mult", "HTF Structure"], group=grpSl, tooltip="Exec ATR × Mult: SL = entry ± (execution-timeframe ATR × multiplier) — e.g. 1.5× the 5m ATR from your entry. HTF Structure: SL anchored beyond the most recent 1H swing on the correct side of the entry.")
+execTf   = input.timeframe("5", "Execution ATR Timeframe", group=grpSl, tooltip="Timeframe of the ATR used for the stop distance. Default = 5m.")
+execMult = input.float(1.5, "SL Distance (× Exec ATR)", minval=0.1, step=0.1, group=grpSl)
+
+// ── Position sizing ──────────────────────────────────────────────────────────
+grpSz       = "Position Sizing"
+acctSize    = input.float(10000.0, "Account Size", minval=0, group=grpSz, tooltip="In your account currency. Set 0 to hide the sizing rows.")
+riskPctIn   = input.float(1.0, "Risk per Trade (%)", minval=0.01, step=0.25, group=grpSz)
+unitsPerLot = input.float(100000, "Units per Lot (contract size)", minval=0.0001, group=grpSz, tooltip="Forex = 100,000 · Gold (XAUUSD) = 100 · Indices/CFDs = 1. Sizing assumes the quote currency is your account currency — apply your broker's conversion otherwise.")
+
+// ── Trade logic ──────────────────────────────────────────────────────────────
+grpTrade  = "Trade Logic"
+biasMode  = input.string("Auto (EMA)", "Bias (when not manual)", options=["Auto (EMA)", "Force Long", "Force Short"], group=grpTrade, tooltip="Auto: price above the 1H EMA = uptrend (long), below = downtrend (short). Ignored when manual entry is enabled.")
+emaLen    = input.int(50, "Trend EMA Length (on ATR TF)", minval=1, group=grpTrade)
+pivotLen  = input.int(3, "Swing Strength (bars each side)", minval=1, group=grpTrade, tooltip="A 1H swing high/low needs this many lower highs / higher lows on each side to confirm. Higher = more significant swings, but they confirm later.")
+slMult    = input.float(0.5, "SL Buffer (× ATR)", minval=0, step=0.1, group=grpTrade, tooltip="Distance beyond the 1H swing point. 0 = stop exactly at the swing high/low.")
+fallMult  = input.float(1.0, "Fallback SL (× ATR from entry)", minval=0.1, step=0.1, group=grpTrade, tooltip="Used when no 1H swing exists on the correct side of your entry: SL = entry ± ATR × this multiple.")
+rr1       = input.float(1.0, "TP1  Risk : Reward", minval=0.1, step=0.1, group=grpTrade)
+rr2       = input.float(2.0, "TP2  Risk : Reward", minval=0.1, step=0.1, group=grpTrade)
+rr3       = input.float(3.0, "TP3  Risk : Reward", minval=0.1, step=0.1, group=grpTrade)
+
+// ── Display ──────────────────────────────────────────────────────────────────
+grpTbl     = "Table"
+posStr     = input.string("Top Right", "Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right", "Middle Left"], group=grpTbl)
+txtStr     = input.string("Normal", "Table Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], group=grpTbl, tooltip="Scales the whole table (text and cells).")
+compact    = input.bool(false, "Compact mode", group=grpTbl, tooltip="Show only Bias, Entry, SL and the TPs — hides ATR, swing anchor, risk and status rows.")
+showLevels = input.bool(false, "Draw SL/TP lines on chart", group=grpTbl, tooltip="Optional dashed levels at the current SL/TP1/TP2/TP3. The entry line is always drawn while manual entry is enabled.")
+
+// ── ATR smoothing (same engine as the stock ATR indicator) ───────────────────
+ma_function(src, len) =>
+    switch smoothing
+        "RMA" => ta.rma(src, len)
+        "SMA" => ta.sma(src, len)
+        "EMA" => ta.ema(src, len)
+        => ta.wma(src, len)
+
+// ── Higher-timeframe data (default 1H) ───────────────────────────────────────
+// Keeps a rolling history of confirmed 1H swing highs/lows (newest first), so
+// the chart-side logic can pick the most recent swing on the CORRECT side of
+// the entry — not just the last swing regardless of where the entry sits.
+// The HTF request returns only simple values: the pivot price on the HTF bar
+// where it confirms (na otherwise) plus the pivot bar's time as an identifier.
+// The rolling history is kept on the chart side — returning arrays through
+// request.security caused runtime error RE10022 (loop too long) on some charts.
+htfData() =>
+    atrV = ma_function(ta.tr(true), sltpAtrLen)
+    emaV = ta.ema(close, emaLen)
+    sltpPl   = ta.pivotlow(low, pivotLen, pivotLen)
+    sltpPh   = ta.pivothigh(high, pivotLen, pivotLen)
+    plT  = not na(sltpPl) ? time[pivotLen] : na
+    phT  = not na(sltpPh) ? time[pivotLen] : na
+    [atrV, emaV, sltpPh, sltpPl, phT, plT]
+
+[htfAtr, htfEma, phVal, plVal, phTime, plTime] = request.security(syminfo.tickerid, atrTf, htfData(), lookahead=barmerge.lookahead_off)
+
+// Execution-timeframe ATR (default 5m) for the "Exec ATR × Mult" stop method
+execAtr = request.security(syminfo.tickerid, execTf, ma_function(ta.tr(true), sltpAtrLen), lookahead=barmerge.lookahead_off)
+
+// Rolling history of confirmed 1H swings, newest first. The HTF pivot value
+// repeats on every chart bar inside its HTF bar, so each pivot is recorded
+// once, keyed by its pivot-bar time.
+int maxSwings = 50
+var array<float> swingLows  = array.new_float()
+var array<float> swingHighs = array.new_float()
+var int lastPlTime = na
+var int lastPhTime = na
+
+if not na(plVal) and (na(lastPlTime) or plTime != lastPlTime)
+    array.unshift(swingLows, plVal)
+    lastPlTime := plTime
+    if array.size(swingLows) > maxSwings
+        array.pop(swingLows)
+if not na(phVal) and (na(lastPhTime) or phTime != lastPhTime)
+    array.unshift(swingHighs, phVal)
+    lastPhTime := phTime
+    if array.size(swingHighs) > maxSwings
+        array.pop(swingHighs)
+
+// Most recent swing strictly below / above a given price (bounded scan)
+recentBelow(array<float> arr, float px) =>
+    float res = na
+    int n = array.size(arr)
+    if n > 0
+        for i = 0 to n - 1
+            v = array.get(arr, i)
+            if v < px
+                res := v
+                break
+    res
+
+recentAbove(array<float> arr, float px) =>
+    float res = na
+    int n = array.size(arr)
+    if n > 0
+        for i = 0 to n - 1
+            v = array.get(arr, i)
+            if v > px
+                res := v
+                break
+    res
+
+// ── Bias & entry ─────────────────────────────────────────────────────────────
+// When switching pairs, the manual entry price might be completely out of scale.
+// Drawing lines at an out-of-scale price shrinks the chart to a horizontal line.
+// We consider the manual entry valid if it's within a reasonable multiple of the current price.
+isValidScale = manEntry > 0 and (manEntry > close * 0.1) and (manEntry < close * 10)
+manualActive = useMan and isValidScale
+
+isLong = manualActive ? manDir == "Buy" :
+     biasMode == "Force Long" ? true :
+     biasMode == "Force Short" ? false : close > htfEma
+
+entry = manualActive ? manEntry : close
+
+// ── Freeze logic ─────────────────────────────────────────────────────────────
+// If a manual time is provided, we sample the variables at that time.
+var float frozenExecAtr = na
+var float frozenHtfAtr  = na
+var float frozenAnchor  = na
+var float frozenSl      = na
+
+// ── Levels ───────────────────────────────────────────────────────────────────
+// Exec ATR × Mult → SL = entry ± (execution-TF ATR × multiplier)
+// HTF Structure   → SL beyond the most recent 1H swing on the correct side of
+//                   the entry (pure ATR fallback if none exists)
+useExecSl = slMode == "Exec ATR × Mult"
+
+float anchor = na
+float sl     = na
+
+if useExecSl
+    sl := isLong ? entry - execAtr * execMult : entry + execAtr * execMult
+else if isLong
+    anchor := recentBelow(swingLows, entry)
+    sl     := na(anchor) ? entry - htfAtr * fallMult : anchor - htfAtr * slMult
+else
+    anchor := recentAbove(swingHighs, entry)
+    sl     := na(anchor) ? entry + htfAtr * fallMult : anchor + htfAtr * slMult
+
+// If manTime is provided and valid (greater than 0), we freeze the values once the bar time matches or exceeds it.
+// We keep updating the frozen variables until we hit the first bar that is >= manTime.
+// Since historical bars are processed sequentially, `frozenSl` will hold the values at the time of entry.
+timeReached = freezeAtEntry and manTime > 0 and time >= manTime
+
+if timeReached and na(frozenSl)
+    frozenExecAtr := execAtr
+    frozenHtfAtr  := htfAtr
+    frozenAnchor  := anchor
+    frozenSl      := sl
+
+// Apply frozen values if we are past the entry time.
+if timeReached and not na(frozenSl)
+    execAtr := frozenExecAtr
+    htfAtr  := frozenHtfAtr
+    anchor  := frozenAnchor
+    sl      := frozenSl
+
+usingFallback = not useExecSl and na(anchor)
+
+// Signed risk: positive while the entry is on the correct side of the stop
+riskSigned = isLong ? entry - sl : sl - entry
+setupValid = riskSigned > 0
+risk       = math.abs(riskSigned)
+riskPct    = entry != 0 ? risk / entry * 100 : na
+
+dir = isLong ? 1 : -1
+tp1 = entry + dir * risk * rr1
+tp2 = entry + dir * risk * rr2
+tp3 = entry + dir * risk * rr3
+
+// ── Position sizing ──────────────────────────────────────────────────────────
+// Units so that a stop-out loses exactly Risk% of the account.
+// Assumes the quote currency is the account currency.
+riskMoney  = acctSize * riskPctIn / 100
+sizeUnits  = acctSize > 0 and risk > 0 ? riskMoney / risk : na
+sizeLots   = sizeUnits / unitsPerLot
+
+// ── Table ────────────────────────────────────────────────────────────────────
+sltpTablePos = posStr == "Top Right" ? position.top_right :
+     posStr == "Top Left" ? position.top_left :
+     posStr == "Bottom Right" ? position.bottom_right :
+     posStr == "Bottom Left" ? position.bottom_left :
+     posStr == "Middle Right" ? position.middle_right : position.middle_left
+
+txtSize = txtStr == "Tiny" ? size.tiny : txtStr == "Small" ? size.small : txtStr == "Large" ? size.large : txtStr == "Huge" ? size.huge : size.normal
+
+colBg     = color.new(#1e222d, 10)
+colHead   = color.new(#2a2e39, 0)
+colLabel  = color.new(#b2b5be, 0)
+colValue  = color.white
+colLong   = color.new(#089981, 0)
+colShort  = color.new(#f23645, 0)
+colWarn   = color.new(#ff9800, 0)
+colManual = color.new(#2962ff, 0)
+
+var table tbl = na
+
+fmt(p) =>
+    na(p) ? "—" : str.tostring(p, format.mintick)
+
+tfLbl(string tf) =>
+    tf + (str.contains(tf, "S") or str.contains(tf, "D") or str.contains(tf, "W") or str.contains(tf, "M") ? "" : "m")
+
+rowPair(int r, string lbl, string val, color valColor, color valBg) =>
+    table.cell(tbl, 0, r, lbl, text_color=colLabel, text_size=txtSize, text_halign=text.align_left)
+    table.cell(tbl, 1, r, val, text_color=valColor, text_size=txtSize, bgcolor=valBg)
+
+if enableAtrSltp and barstate.islast
+    table.delete(tbl)
+    tbl := table.new(sltpTablePos, 2, 15, bgcolor=colBg, frame_width=1, frame_color=color.new(color.gray, 50), border_width=1, border_color=color.new(color.gray, 75))
+    biasTxt   = useMan and not isValidScale ? "Out of Scale (using auto)" : manualActive ? (isLong ? "BUY (manual)" : "SELL (manual)") : (isLong ? "LONG (uptrend)" : "SHORT (downtrend)")
+    biasCol   = useMan and not isValidScale ? color.orange : isLong ? colLong : colShort
+    anchorLbl = usingFallback ? "No swing → ATR stop" : isLong ? "1H Swing Low" : "1H Swing High"
+    entryLbl  = manualActive ? "Entry (manual)" : "Entry (last)"
+    showSize  = acctSize > 0
+
+    table.cell(tbl, 0, 0, "ATR SL/TP  ·  " + tfLbl(useExecSl ? execTf : atrTf), text_color=colValue, text_size=txtSize, bgcolor=colHead)
+    table.merge_cells(tbl, 0, 0, 1, 0)
+
+    int r = 1
+    rowPair(r, "Bias", biasTxt, color.white, biasCol)
+    r += 1
+    if not compact
+        if useExecSl
+            rowPair(r, "ATR (" + tfLbl(execTf) + ")", fmt(execAtr), colValue, na)
+            r += 1
+            rowPair(r, "SL dist (" + str.tostring(execMult, "#.##") + "× ATR)", fmt(execAtr * execMult), colValue, na)
+            r += 1
+        else
+            rowPair(r, "ATR (" + tfLbl(atrTf) + ")", fmt(htfAtr), colValue, na)
+            r += 1
+            rowPair(r, anchorLbl, fmt(anchor), colValue, na)
+            r += 1
+    rowPair(r, entryLbl, fmt(entry), manualActive ? color.white : colValue, manualActive ? colManual : na)
+    r += 1
+    if manTime > 0
+        rowPair(r, "Entry Time", str.format("{0,date,HH:mm yyyy-MM-dd}", manTime), color.white, colManual)
+        r += 1
+    rowPair(r, "Stop Loss", fmt(sl), color.white, colShort)
+    r += 1
+    rowPair(r, "TP1  (1:" + str.tostring(rr1, "#.##") + ")", fmt(tp1), color.white, color.new(#089981, 40))
+    r += 1
+    rowPair(r, "TP2  (1:" + str.tostring(rr2, "#.##") + ")", fmt(tp2), color.white, color.new(#089981, 20))
+    r += 1
+    rowPair(r, "TP3  (1:" + str.tostring(rr3, "#.##") + ")", fmt(tp3), color.white, colLong)
+    r += 1
+    if showSize
+        rowPair(r, "Size (" + str.tostring(riskPctIn, "#.##") + "% = " + str.tostring(riskMoney, "#.##") + ")", na(sizeLots) ? "—" : str.tostring(sizeLots, "#.####") + " lots  (" + str.tostring(sizeUnits, "#.##") + " units)", colValue, colManual)
+        r += 1
+    if not compact
+        rowPair(r, "Risk", fmt(risk) + "  (" + str.tostring(riskPct, "#.##") + "%)", colValue, na)
+        r += 1
+        rowPair(r, "Status", setupValid ? "✔ valid" : "⚠ entry beyond stop", setupValid ? colLong : colWarn, na)
+
+if not enableAtrSltp and barstate.islast
+    table.delete(tbl)
+
+// ── On-chart levels ──────────────────────────────────────────────────────────
+// The entry line is always drawn while manual entry is active; SL/TP lines are
+// optional via "Draw SL/TP lines on chart".
+var line  enLine  = na
+var line  slLine  = na
+var line  tp1Line = na
+var line  tp2Line = na
+var line  tp3Line = na
+var label enLbl   = na
+var label slLbl   = na
+var label tp1Lbl  = na
+var label tp2Lbl  = na
+var label tp3Lbl  = na
+
+if enableAtrSltp and barstate.islast
+    line.delete(enLine)
+    line.delete(slLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(tp3Line)
+    label.delete(enLbl)
+    label.delete(slLbl)
+    label.delete(tp1Lbl)
+    label.delete(tp2Lbl)
+    label.delete(tp3Lbl)
+
+    x1 = bar_index - 15
+    x2 = bar_index + 8
+
+    if manualActive or showLevels
+        enLine := line.new(x1, entry, x2, entry, color=manualActive ? colManual : color.new(color.gray, 30), style=line.style_solid, width=2)
+        enLbl  := label.new(x2, entry, "ENTRY " + fmt(entry), style=label.style_label_left, color=manualActive ? colManual : color.new(color.gray, 30), textcolor=color.white, size=size.small)
+
+    if showLevels
+        slLine  := line.new(x1, sl, x2, sl, color=colShort, style=line.style_dashed, width=2)
+        tp1Line := line.new(x1, tp1, x2, tp1, color=color.new(#089981, 40), style=line.style_dashed, width=1)
+        tp2Line := line.new(x1, tp2, x2, tp2, color=color.new(#089981, 20), style=line.style_dashed, width=1)
+        tp3Line := line.new(x1, tp3, x2, tp3, color=colLong, style=line.style_dashed, width=2)
+        slLbl   := label.new(x2, sl, "SL " + fmt(sl), style=label.style_label_left, color=colShort, textcolor=color.white, size=size.small)
+        tp1Lbl  := label.new(x2, tp1, "TP1 " + fmt(tp1), style=label.style_label_left, color=color.new(#089981, 40), textcolor=color.white, size=size.small)
+        tp2Lbl  := label.new(x2, tp2, "TP2 " + fmt(tp2), style=label.style_label_left, color=color.new(#089981, 20), textcolor=color.white, size=size.small)
+        tp3Lbl  := label.new(x2, tp3, "TP3 " + fmt(tp3), style=label.style_label_left, color=colLong, textcolor=color.white, size=size.small)
+
+// ── Alerts (optional) ────────────────────────────────────────────────────────
+// ta.cross() is assigned unconditionally every bar, then gated by the toggle,
+// so its historical-continuity tracking never skips a bar (Pine warns against
+// calling ta.cross() directly inside a conditional expression).
+sltpSlCrossed  = ta.cross(close, sl)
+sltpTp1Crossed = ta.cross(close, tp1)
+sltpTp2Crossed = ta.cross(close, tp2)
+sltpTp3Crossed = ta.cross(close, tp3)
+alertcondition(enableAtrSltp and sltpSlCrossed,  title="Price crossed Stop Loss",  message="Price crossed the ATR structure Stop Loss level")
+alertcondition(enableAtrSltp and sltpTp1Crossed, title="Price crossed TP1", message="Price crossed Take Profit 1")
+alertcondition(enableAtrSltp and sltpTp2Crossed, title="Price crossed TP2", message="Price crossed Take Profit 2")
+alertcondition(enableAtrSltp and sltpTp3Crossed, title="Price crossed TP3", message="Price crossed Take Profit 3")
