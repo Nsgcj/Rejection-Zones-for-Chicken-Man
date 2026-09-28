@@ -328,10 +328,14 @@ f_far(Zone z) =>
     float d = close > z.top ? close - z.top : close < z.bot ? z.bot - close : 0.0
     i_maxDist > 0 and d / close * 100 > i_maxDist
 
-// Label corner differs per timeframe so zones stacked on the same price
-// (e.g. a W and a 15D zone) do not print their labels on top of each other.
+// Label position differs per timeframe so zones stacked on the same price
+// (e.g. a W and a 15D zone) do not print their labels on top of each other:
+// M top-right, W middle-right, 15D bottom-right, D middle-left.
 f_zoneHalign(int i) =>
-    i == 1 ? text.align_left : i == 2 ? text.align_center : text.align_right
+    i == 3 ? text.align_left : text.align_right
+
+f_zoneValign(int i) =>
+    i == 0 ? text.align_top : i == 2 ? text.align_bottom : text.align_center
 
 f_drawZone(Zone z) =>
     bool  pend = f_pending(z)
@@ -343,7 +347,7 @@ f_drawZone(Zone z) =>
          border_color = c, border_width = bw,
          border_style = pend ? line.style_dashed : line.style_solid,
          text = i_zoneTxt ? f_zoneText(z) : "", text_size = size.small, text_color = c,
-         text_halign = f_zoneHalign(z.tfi), text_valign = z.dir == 1 ? text.align_bottom : text.align_top)
+         text_halign = f_zoneHalign(z.tfi), text_valign = f_zoneValign(z.tfi))
     if i_quads
         float h = z.top - z.bot
         z.q1 := line.new(z.t0, z.bot + h * 0.25, rt, z.bot + h * 0.25, xloc = xloc.bar_time, color = color.new(c, 60), style = line.style_dotted)
