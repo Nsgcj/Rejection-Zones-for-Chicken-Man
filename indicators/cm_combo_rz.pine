@@ -1583,6 +1583,7 @@ i_qShow  = input.int(30, "Min quality to draw",                   group = G_QLT,
 i_qSetup = input.int(60, "Min quality for setups & alerts",       group = G_QLT, minval = 0, maxval = 100, tooltip = "Setup labels and all zone alerts need a zone at or above this score.")
 i_showQ  = input.bool(true, "Show score on zone labels",          group = G_QLT, tooltip = "Score (0-100):\n• Tags: LIQ 20 (or SFP 15), S&R 20, S&D 15, FVG 10\n• Wick size: up to 15 (full at 2× the wick-to-body ratio)\n• Displacement: up to 15 (full at 2× the S&D displacement)\n• Freshness: 10 untouched, -4 per visit, -5 while price is wicking through the tip")
 
+i_ltfZones = input.bool(true, "Zones on structure TFs (4H / 1H / 5m)", group = G_VIS, tooltip = "Also draws rejection zones on the three structure timeframes, with the same detection, quality and invalidation rules. A setup still needs a zone from a HIGHER timeframe than the break (a 5m break can use a 1H, 4H or zone-TF zone; a 4H break only the M / W / 15D / D zones).")
 i_maxZones = input.int(2,    "Zones per TF per side",            group = G_VIS, minval = 1, maxval = 6, tooltip = "Keeps the best N demand and N supply zones for each timeframe: unconfirmed 'S&D?' zones go first, then the lowest score, then the farthest.")
 i_showMit  = input.bool(true, "Show mitigated blocks",           group = G_VIS, inline = "mit", tooltip = "On: a zone that closes through its wick tip stays on the chart, faded and dotted, frozen where it broke, and a new zone on the other side that overlaps it is tagged as an S&R flip. Off: broken zones are deleted.")
 i_keepMit  = input.int(2,    "keep per TF",                     group = G_VIS, inline = "mit", minval = 1, maxval = 10)
@@ -1667,9 +1668,10 @@ f_tfName(simple string tf) =>
     s >= 86400 ? (tf == "1D" or tf == "D" ? "D" : tf == "1W" or tf == "W" ? "W" : tf == "1M" or tf == "M" ? "M" : tf) :
      s % 3600 == 0 ? str.tostring(s / 3600) + "H" : str.tostring(s / 60) + "m"
 
-// Next timeframe down for early confirmation: M->W, W->D, 15D->D, D->4H.
+// Next timeframe down, for early confirmation and zone invalidation:
+// M->W, W->D, 15D->D, D->4H, 4H->1H, 1H->5m (5m uses its own close).
 f_next(int i) =>
-    i == 0 ? 1 : i <= 2 ? 3 : 4
+    i == 0 ? 1 : i <= 2 ? 3 : i == 3 ? 4 : i == 4 ? 5 : 6
 
 f_countIn(array<float> a, float lo, float hi) =>
     int n = 0
@@ -2016,12 +2018,13 @@ f_far(Zone z) =>
     i_maxDist > 0 and d / close * 100 > i_maxDist
 
 // Label position differs per timeframe so stacked zones stay legible:
-// M top-right, W middle-right, 15D bottom-right, D middle-left.
+// M top-right, W middle-right, 15D bottom-right, D middle-left,
+// 4H top-left, 1H bottom-left, 5m centre.
 f_zoneHalign(int i) =>
-    i == 3 ? text.align_left : text.align_right
+    i == 3 or i == 4 or i == 5 ? text.align_left : i == 6 ? text.align_center : text.align_right
 
 f_zoneValign(int i) =>
-    i == 0 ? text.align_top : i == 2 ? text.align_bottom : text.align_center
+    i == 0 or i == 4 ? text.align_top : i == 2 or i == 5 ? text.align_bottom : text.align_center
 
 // Quadrant price: 0% = body edge, 50% = Mean Threshold, 100% = wick tip.
 f_qPrice(Zone z, float pct) =>
@@ -2050,7 +2053,7 @@ f_drawZone(Zone z) =>
              text_halign = f_zoneHalign(z.tfi), text_valign = f_zoneValign(z.tfi))
     else
         bool pend = f_pending(z)
-        int  bw   = z.tfi == 0 ? 3 : z.tfi == 3 ? 1 : 2
+        int  bw   = z.tfi == 0 ? 3 : z.tfi <= 2 ? 2 : 1
         z.bx := box.new(z.t0, z.top, rt, z.bot, xloc = xloc.bar_time,
              bgcolor = color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT),
              border_color = c, border_width = bw,
@@ -2158,7 +2161,7 @@ f_markFvg(int i, int zd, int t1, int t2) =>
 if array.size(zones) > 0
     for j = array.size(zones) - 1 to 0
         Zone z = array.get(zones, j)
-        bool remove = not array.get(isOn, z.tfi)
+        bool remove = not array.get(isOn, z.tfi) or (z.tfi >= 4 and not i_ltfZones)
         if not z.mitig and not remove
             float own  = array.get(closes, z.tfi)
             float nc   = f_nextClose(z.tfi)
@@ -2236,7 +2239,7 @@ if array.size(zones) > 0
                 for lb in z.qLbls
                     label.set_x(lb, rt)
 
-for k = 0 to 3
+for k = 0 to 6
     f_pruneMit(k)
 
 // ============================================================================
@@ -2282,7 +2285,7 @@ f_event(int i, int zd, bool choch, float lvl, int pivT, int evTime, bool early) 
     if i >= 4 and (choch or i_setupBos) and ceOk
         Zone best = na
         for z in zones
-            if not z.mitig and z.dir == zd and not f_pending(z) and z.q >= i_qSetup and z.tapped and bar_index - z.tapBar <= i_setupWin and not f_fired(z, i)
+            if not z.mitig and z.dir == zd and z.tfi < i and not f_pending(z) and z.q >= i_qSetup and z.tapped and bar_index - z.tapBar <= i_setupWin and not f_fired(z, i)
                 if na(best)
                     best := z
                 else if z.tfi < best.tfi or (z.tfi == best.tfi and z.q > best.q)
@@ -2317,7 +2320,7 @@ f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC,
     bool newFd   = not na(fd) and (na(fd[1]) or fd != fd[1])
     bool live    = array.get(sameTf, i) and not barstate.isconfirmed
     if array.get(isOn, i) and not live
-        if i <= 3
+        if i <= 3 or i_ltfZones
             if newBull
                 f_addZone(i, 1, bTop, bBot, bTag, bRat, bVol, bExt, bT)
             if newBear
@@ -2464,7 +2467,7 @@ if barstate.islast
                 int    pd   = array.get(pendArr, i)
                 string last = array.get(lastTxt, i) + (pd == 1 ? " · wick ↑ pending" : pd == -1 ? " · wick ↓ pending" : "")
                 table.cell(dash, 2, r, last, text_color = color.silver, text_size = dsz, text_halign = text.align_left)
-                if i <= 3
+                if i <= 3 or i_ltfZones
                     [zt, zc] = f_zoneStatus(i)
                     table.cell(dash, 3, r, zt, text_color = zc, text_size = dsz, text_halign = text.align_left)
                 else
