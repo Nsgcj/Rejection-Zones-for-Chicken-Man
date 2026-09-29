@@ -1,5 +1,5 @@
 //@version=6
-indicator("CM Rejection Zones", shorttitle = "CM RZ", overlay = true,
+indicator("CM Rejection Zones (legacy)", shorttitle = "CM RZ legacy", overlay = true,
      max_boxes_count  = 200,
      max_lines_count  = 400,
      max_labels_count = 300)
@@ -7,7 +7,11 @@ indicator("CM Rejection Zones", shorttitle = "CM RZ", overlay = true,
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //
 // ============================================================================
-// CM REJECTION ZONES  —  standalone module (to be merged into CM Combo)
+// CM REJECTION ZONES  —  LEGACY standalone module
+// ----------------------------------------------------------------------------
+// SUPERSEDED. Kept for reference only. Use indicators/cm_combo_rz.pine (zones
+// built into CM Combo, with quality score, quadrants, mitigation, SFP, 4H/1H/5m
+// and chart-TF zones) or indicators/cm_rjb_pro.pine (standalone RJB).
 // ----------------------------------------------------------------------------
 // 1. HTF REJECTION ZONES on up to four timeframes (default M / W / 15D / D).
 //    A zone is the rejecting wick only: wick tip to body edge.
