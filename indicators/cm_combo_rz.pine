@@ -2069,12 +2069,22 @@ f_addZone(int i, int zd, float top, float bot, int tags, float ratio, int t0) =>
         if not f_pending(z) and z.q >= i_qSetup
             array.set(fl, 0, true)
 
+// Optimization: Reverse iteration over zones array since zones are stored chronologically.
+// Target FVG zones (matching t1 or t2) sit at or near the end of the array.
+// Once z.t0 < minT for timeframe i, older zones predate the FVG window,
+// allowing an early exit (break) that reduces lookup time from O(N) to O(1).
 f_markFvg(int i, int zd, int t1, int t2) =>
-    if i_useFvg
-        for z in zones
-            if z.tfi == i and z.dir == zd and not z.mitig and (z.t0 == t1 or z.t0 == t2)
-                z.fvg := true
-                z.sd  := true
+    if i_useFvg and array.size(zones) > 0
+        int minT = math.min(t1, t2)
+        int sz   = array.size(zones)
+        for k = sz - 1 to 0
+            Zone z = array.get(zones, k)
+            if z.tfi == i and z.dir == zd and not z.mitig
+                if z.t0 == t1 or z.t0 == t2
+                    z.fvg := true
+                    z.sd  := true
+                else if z.t0 < minT
+                    break
 
 // Update every zone: invalidation / mitigation, S&D, taps, score and redraw.
 if array.size(zones) > 0
