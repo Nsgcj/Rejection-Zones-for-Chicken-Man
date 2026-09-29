@@ -1531,8 +1531,11 @@ alertcondition(enableAtrSltp and sltpTp3Crossed, title="Price crossed TP3", mess
 // ══════════════════════════════════════════════════════════════════════════
 //  MODULE — M1 REJECTION ZONES (HTF zones / multi-TF structure / setups)
 // ══════════════════════════════════════════════════════════════════════════
-// Zones: rejecting wick only (wick tip = 0%, body edge = 100%) on up to four
-// timeframes, tagged LIQ / S&R / S&D (+FVG). Each zone carries a 0-100
+// Zones: rejecting wick only (body edge = 0%, wick tip = 100%) on up to four
+// timeframes. A zone needs a three-candle signal wick (extreme wick of its
+// group, body at the extreme), so it is confirmed when the NEXT candle on its
+// timeframe closes. Tagged LIQ (wick-only sweep) / SFP (swing failure) /
+// S&R / S&D (+FVG) / VOL (volume-validated). Each zone carries a 0-100
 // quality score built from its tags, wick size, displacement and freshness;
 // only zones at or above "Min quality to draw" are drawn, and setups and
 // alerts need "Min quality for setups & alerts".
@@ -1572,14 +1575,17 @@ i_wick   = input.float(1.5, "Wick-to-body ratio",                 group = G_DET,
 i_srTol  = input.float(0.25, "S&R level tolerance (× HTF ATR)",   group = G_DET, minval = 0.0, step = 0.05, tooltip = "How close an earlier swing must sit to the wick to count as the same level.")
 i_sdMult = input.float(1.0, "S&D displacement (× HTF ATR)",       group = G_DET, minval = 0.1, step = 0.1, tooltip = "How far price must move away from the zone for the S&D tag.")
 i_sdBars = input.int(3,     "S&D window (HTF bars)",              group = G_DET, minval = 1, maxval = 20, tooltip = "An untagged 'S&D?' zone is removed if the displacement has not come within this many zone-TF bars.")
+i_useSfp = input.bool(true, "SFP Wick to zone",                  group = G_DET, tooltip = "Also create a zone from a swing failure: the wick sweeps a swing and the candle closes back inside even though its body crossed the level. Tagged SFP (worth a little less than a wick-only LIQ sweep).")
+i_volPct = input.int(100, "Volume validation (% of 20-bar avg)", group = G_DET, minval = 10, maxval = 500, tooltip = "A zone whose signal candle traded at least this % of the previous 20-bar average volume (on the zone timeframe) gets a VOL tag. Informational; symbols without volume show nothing.")
 i_useFvg = input.bool(true, "FVG strengthens S&D",                group = G_DET, tooltip = "A zone whose rejection candle (or the candle after it) starts a fair value gap on the zone timeframe gets the S&D+FVG tag and extra quality points.")
 
 i_qShow  = input.int(40, "Min quality to draw",                   group = G_QLT, minval = 0, maxval = 100, tooltip = "Zones scoring below this are tracked but not drawn and not counted in the dashboard.")
 i_qSetup = input.int(60, "Min quality for setups & alerts",       group = G_QLT, minval = 0, maxval = 100, tooltip = "Setup labels and all zone alerts need a zone at or above this score.")
-i_showQ  = input.bool(true, "Show score on zone labels",          group = G_QLT, tooltip = "Score (0-100):\n• Tags: LIQ 20, S&R 20, S&D 15, FVG 10\n• Wick size: up to 15 (full at 2× the wick-to-body ratio)\n• Displacement: up to 15 (full at 2× the S&D displacement)\n• Freshness: 10 untouched, -4 per visit, -5 while price is wicking through the tip")
+i_showQ  = input.bool(true, "Show score on zone labels",          group = G_QLT, tooltip = "Score (0-100):\n• Tags: LIQ 20 (or SFP 15), S&R 20, S&D 15, FVG 10\n• Wick size: up to 15 (full at 2× the wick-to-body ratio)\n• Displacement: up to 15 (full at 2× the S&D displacement)\n• Freshness: 10 untouched, -4 per visit, -5 while price is wicking through the tip")
 
 i_maxZones = input.int(2,    "Zones per TF per side",            group = G_VIS, minval = 1, maxval = 6, tooltip = "Keeps the best N demand and N supply zones for each timeframe: unconfirmed 'S&D?' zones go first, then the lowest score, then the farthest.")
-i_keepMit  = input.int(2,    "Mitigated zones kept per TF",      group = G_VIS, minval = 0, maxval = 10, tooltip = "Mitigated zones stay on the chart, faded and dotted, frozen where they broke. A new zone on the other side that overlaps one is tagged as an S&R flip. 0 = delete zones as soon as they break.")
+i_showMit  = input.bool(true, "Show mitigated blocks",           group = G_VIS, inline = "mit", tooltip = "On: a zone that closes through its wick tip stays on the chart, faded and dotted, frozen where it broke, and a new zone on the other side that overlaps it is tagged as an S&R flip. Off: broken zones are deleted.")
+i_keepMit  = input.int(2,    "keep per TF",                     group = G_VIS, inline = "mit", minval = 1, maxval = 10)
 i_extBars  = input.int(20,   "Extend right (chart bars)",        group = G_VIS, minval = 0, maxval = 300)
 i_zoneTxt  = input.bool(true, "Zone labels",                     group = G_VIS)
 i_maxDist  = input.float(3.0, "Hide zones farther than (% from price)", group = G_VIS, minval = 0.0, step = 0.5, tooltip = "Zones farther than this from the current price are not drawn, so a distant monthly zone cannot squash the chart scale. They are still tracked and still count for setups and the dashboard. 0 = always draw.")
@@ -1587,7 +1593,7 @@ i_cDem     = input.color(color.new(color.teal, 0), "Demand",     group = G_VIS, 
 i_cSup     = input.color(color.new(color.red,  0), "Supply",     group = G_VIS, inline = "zc")
 i_fillT    = input.int(85,   "Fill transparency (100 = no fill)", group = G_VIS, minval = 0, maxval = 100)
 
-i_quads = input.bool(true, "Show quadrant levels", group = G_QD, tooltip = "0% = wick tip (the rejection extreme), 100% = body edge. Each level has its own switch, style, width and price label.")
+i_quads = input.bool(true, "Show quadrant levels", group = G_QD, tooltip = "0% = body edge, 50% = Mean Threshold, 100% = wick tip (the rejection extreme and invalidation level). Each level has its own switch, style, width and price label.")
 i_q0    = input.bool(false,    "0%  ",   group = G_QD, inline = "q0")
 i_q0s   = input.string("Solid", "",     options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q0")
 i_q0w   = input.int(1, "",              minval = 1, maxval = 4, group = G_QD, inline = "q0")
@@ -1623,7 +1629,7 @@ i_setupCE   = input.bool(false, "Require Chandelier agreement",  group = G_SIG, 
 i_setupWin  = input.int(30,     "Zone tap window (chart bars)",  group = G_SIG, minval = 1, maxval = 500, tooltip = "The break must come within this many chart bars of price last trading into the zone.")
 
 const string G_PRF = "RZ ▸ Setup proof"
-i_proof     = input.bool(true, "Track setup proof",             group = G_PRF, tooltip = "Measures every setup on this chart: entry at the setup bar's close, stop at the zone's wick tip (0%), target at R × that risk. A setup wins if the target trades before the stop (stop checked first on a bar that hits both), and expires if neither happens in time. Results show in the dashboard.")
+i_proof     = input.bool(true, "Track setup proof",             group = G_PRF, tooltip = "Measures every setup on this chart: entry at the setup bar's close, stop at the zone's wick tip (100%), target at R × that risk. A setup wins if the target trades before the stop (stop checked first on a bar that hits both), and expires if neither happens in time. Results show in the dashboard.")
 i_proofR    = input.float(2.0, "Target (R multiple)",           group = G_PRF, minval = 0.5, step = 0.5)
 i_proofBars = input.int(300,   "Expire after (chart bars)",     group = G_PRF, minval = 10, maxval = 5000)
 
@@ -1631,6 +1637,12 @@ i_alSess = input.bool(false, "Only alert during sessions",       group = G_ALR, 
 i_alA    = input.bool(true,  "Asia",     group = G_ALR, inline = "as")
 i_alL    = input.bool(true,  "London",   group = G_ALR, inline = "as")
 i_alN    = input.bool(true,  "New York", group = G_ALR, inline = "as")
+i_alNyAm = input.bool(false, "", group = G_ALR, inline = "nyam")
+i_nyAm   = input.session("0830-1100", "NY AM window", group = G_ALR, inline = "nyam", tooltip = "Extra New York windows (America/New_York time). Ticked windows are added to the sessions above.")
+i_alNyPm = input.bool(false, "", group = G_ALR, inline = "nypm")
+i_nyPm   = input.session("1330-1600", "NY PM window", group = G_ALR, inline = "nypm")
+i_alTap  = input.bool(true, "Alert on 50% tap", group = G_ALR, tooltip = "Fires when a confirmed close crosses the Mean Threshold of a zone at or above the setup quality, once per visit.")
+i_alDyn  = input.bool(true, "Dynamic alert() messages", group = G_ALR, tooltip = "Also sends detailed messages (direction, timeframe, symbol, price, session) through alert(). Create one alert with 'Any alert() function call' to receive them.")
 
 i_dash     = input.bool(true, "Show dashboard", group = G_DSH)
 i_dashPos  = input.string("Bottom Right", "Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right", "Middle Left"], group = G_DSH)
@@ -1729,14 +1741,25 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol, simple int o
     var array<float> pHs   = array.new_float()
     var array<float> pLs   = array.new_float()
 
+    // Relative volume of this candle against the previous 20-bar average.
+    float volAvg = ta.sma(volume, 20)
+    float relVol = nz(volAvg[1]) > 0 ? 100.0 * volume / volAvg[1] : float(na)
+
+    // Wick-only sweep: the wick trades through a level, the body does not.
+    // SFP: the wick trades through and the candle closes back inside even
+    // though its body crossed the level.
     bool bearLiq = false
+    bool bearSfp = false
     bool bullLiq = false
+    bool bullSfp = false
     if array.size(liqHs) > 0
         for k = array.size(liqHs) - 1 to 0
             float lv = array.get(liqHs, k)
             if high > lv
                 if bodyHi < lv
                     bearLiq := true
+                else if close < lv
+                    bearSfp := true
                 array.remove(liqHs, k)
     if array.size(liqLs) > 0
         for k = array.size(liqLs) - 1 to 0
@@ -1744,41 +1767,66 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol, simple int o
             if low < lv
                 if bodyLo > lv
                     bullLiq := true
+                else if close > lv
+                    bullSfp := true
                 array.remove(liqLs, k)
+    bearSfp := i_useSfp and bearSfp and not bearLiq
+    bullSfp := i_useSfp and bullSfp and not bullLiq
 
     bool bearWick = upW > 0 and upW >= wickRatio * body and upW >= dnW
     bool bullWick = dnW > 0 and dnW >= wickRatio * body and dnW >= upW
+
+    // Candidates are tagged on their own candle (S&R is measured against the
+    // swings known at that moment). Tags: 1 LIQ, 2 SFP, 4 S&R.
+    float tol      = srTol * nz(atrV, high - low)
+    bool  candBear = bearLiq or bearSfp or bearWick
+    bool  candBull = bullLiq or bullSfp or bullWick
+    int   tagBear  = 0
+    int   tagBull  = 0
+    if candBear
+        int nH = f_countIn(pHs, bodyHi - tol, high + tol)
+        int nL = f_countIn(pLs, bodyHi - tol, high + tol)
+        bool sr = nL >= 1 or nH >= (bearLiq or bearSfp ? 2 : 1)
+        tagBear := (bearLiq ? 1 : 0) + (bearSfp ? 2 : 0) + (sr ? 4 : 0)
+    if candBull
+        int nH = f_countIn(pHs, low - tol, bodyLo + tol)
+        int nL = f_countIn(pLs, low - tol, bodyLo + tol)
+        bool sr = nH >= 1 or nL >= (bullLiq or bullSfp ? 2 : 1)
+        tagBull := (bullLiq ? 1 : 0) + (bullSfp ? 2 : 0) + (sr ? 4 : 0)
+
+    // Three-candle signal wick (required): the previous candle is the middle
+    // one. It must have the extreme wick of the three and its body at the
+    // extreme, so a zone is confirmed when the candle AFTER it closes.
+    bool sigBear = candBear[1] and high[1] > high[2] and high[1] > high and bodyHi[1] >= bodyHi[2] and bodyHi[1] >= bodyHi
+    bool sigBull = candBull[1] and low[1] < low[2] and low[1] < low and bodyLo[1] <= bodyLo[2] and bodyLo[1] <= bodyLo
 
     var int   zBullT    = na
     var float zBullTop  = na
     var float zBullBot  = na
     var int   zBullTags = 0
     var float zBullRat  = na
+    var float zBullVol  = na
     var int   zBearT    = na
     var float zBearTop  = na
     var float zBearBot  = na
     var int   zBearTags = 0
     var float zBearRat  = na
+    var float zBearVol  = na
 
-    float tol = srTol * nz(atrV, high - low)
-    if bearLiq or bearWick
-        int nH = f_countIn(pHs, bodyHi - tol, high + tol)
-        int nL = f_countIn(pLs, bodyHi - tol, high + tol)
-        bool sr = nL >= 1 or nH >= (bearLiq ? 2 : 1)
-        zBearT    := time
-        zBearTop  := high
-        zBearBot  := bodyHi
-        zBearTags := (bearLiq ? 1 : 0) + (sr ? 4 : 0)
-        zBearRat  := upW / body
-    if bullLiq or bullWick
-        int nH = f_countIn(pHs, low - tol, bodyLo + tol)
-        int nL = f_countIn(pLs, low - tol, bodyLo + tol)
-        bool sr = nH >= 1 or nL >= (bullLiq ? 2 : 1)
-        zBullT    := time
-        zBullTop  := bodyLo
-        zBullBot  := low
-        zBullTags := (bullLiq ? 1 : 0) + (sr ? 4 : 0)
-        zBullRat  := dnW / body
+    if sigBear
+        zBearT    := time[1]
+        zBearTop  := high[1]
+        zBearBot  := bodyHi[1]
+        zBearTags := tagBear[1]
+        zBearRat  := upW[1] / body[1]
+        zBearVol  := relVol[1]
+    if sigBull
+        zBullT    := time[1]
+        zBullTop  := bodyLo[1]
+        zBullBot  := low[1]
+        zBullTags := tagBull[1]
+        zBullRat  := dnW[1] / body[1]
+        zBullVol  := relVol[1]
 
     // ── Fair value gaps: origin candle [2] (or [3]) and the current bar ──
     var int fvgUpT  = na
@@ -1812,18 +1860,18 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol, simple int o
         if array.size(pLs) > 10
             array.shift(pLs)
 
-    [close[off], atrV[off], swH[off], swL[off], swHT[off], swLT[off], evT[off], evDir[off], evChoch[off], evLvl[off], evPivT[off], zBullT[off], zBullTop[off], zBullBot[off], zBullTags[off], zBullRat[off], zBearT[off], zBearTop[off], zBearBot[off], zBearTags[off], zBearRat[off], fvgUpT[off], fvgUpT2[off], fvgDnT[off], fvgDnT2[off]]
+    [close[off], atrV[off], swH[off], swL[off], swHT[off], swLT[off], evT[off], evDir[off], evChoch[off], evLvl[off], evPivT[off], zBullT[off], zBullTop[off], zBullBot[off], zBullTags[off], zBullRat[off], zBullVol[off], zBearT[off], zBearTop[off], zBearBot[off], zBearTags[off], zBearRat[off], zBearVol[off], fvgUpT[off], fvgUpT2[off], fvgDnT[off], fvgDnT2[off]]
 
 f_off(simple string tf) =>
     timeframe.in_seconds(tf) == chartSec ? 0 : 1
 
-[c0, a0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, rT0, rTop0, rBot0, rTag0, rRat0, fu0, fuu0, fd0, fdd0] = request.security(syminfo.tickerid, f_req(i_tf0), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf0)), lookahead = barmerge.lookahead_on)
-[c1, a1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, rT1, rTop1, rBot1, rTag1, rRat1, fu1, fuu1, fd1, fdd1] = request.security(syminfo.tickerid, f_req(i_tf1), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf1)), lookahead = barmerge.lookahead_on)
-[c2, a2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, rT2, rTop2, rBot2, rTag2, rRat2, fu2, fuu2, fd2, fdd2] = request.security(syminfo.tickerid, f_req(i_tf2), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf2)), lookahead = barmerge.lookahead_on)
-[c3, a3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, rT3, rTop3, rBot3, rTag3, rRat3, fu3, fuu3, fd3, fdd3] = request.security(syminfo.tickerid, f_req(i_tf3), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf3)), lookahead = barmerge.lookahead_on)
-[c4, a4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, rT4, rTop4, rBot4, rTag4, rRat4, fu4, fuu4, fd4, fdd4] = request.security(syminfo.tickerid, f_req(i_tf4), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf4)), lookahead = barmerge.lookahead_on)
-[c5, a5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, rT5, rTop5, rBot5, rTag5, rRat5, fu5, fuu5, fd5, fdd5] = request.security(syminfo.tickerid, f_req(i_tf5), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf5)), lookahead = barmerge.lookahead_on)
-[c6, a6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, rT6, rTop6, rBot6, rTag6, rRat6, fu6, fuu6, fd6, fdd6] = request.security(syminfo.tickerid, f_req(i_tf6), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf6)), lookahead = barmerge.lookahead_on)
+[c0, a0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, bVol0, rT0, rTop0, rBot0, rTag0, rRat0, rVol0, fu0, fuu0, fd0, fdd0] = request.security(syminfo.tickerid, f_req(i_tf0), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf0)), lookahead = barmerge.lookahead_on)
+[c1, a1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, bVol1, rT1, rTop1, rBot1, rTag1, rRat1, rVol1, fu1, fuu1, fd1, fdd1] = request.security(syminfo.tickerid, f_req(i_tf1), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf1)), lookahead = barmerge.lookahead_on)
+[c2, a2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, bVol2, rT2, rTop2, rBot2, rTag2, rRat2, rVol2, fu2, fuu2, fd2, fdd2] = request.security(syminfo.tickerid, f_req(i_tf2), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf2)), lookahead = barmerge.lookahead_on)
+[c3, a3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, bVol3, rT3, rTop3, rBot3, rTag3, rRat3, rVol3, fu3, fuu3, fd3, fdd3] = request.security(syminfo.tickerid, f_req(i_tf3), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf3)), lookahead = barmerge.lookahead_on)
+[c4, a4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, bVol4, rT4, rTop4, rBot4, rTag4, rRat4, rVol4, fu4, fuu4, fd4, fdd4] = request.security(syminfo.tickerid, f_req(i_tf4), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf4)), lookahead = barmerge.lookahead_on)
+[c5, a5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, bVol5, rT5, rTop5, rBot5, rTag5, rRat5, rVol5, fu5, fuu5, fd5, fdd5] = request.security(syminfo.tickerid, f_req(i_tf5), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf5)), lookahead = barmerge.lookahead_on)
+[c6, a6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, bVol6, rT6, rTop6, rBot6, rTag6, rRat6, rVol6, fu6, fuu6, fd6, fdd6] = request.security(syminfo.tickerid, f_req(i_tf6), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf6)), lookahead = barmerge.lookahead_on)
 
 // ============================================================================
 // PER-TIMEFRAME LOOKUPS  (index 0-3 = zone TFs, 4-6 = structure TFs)
@@ -1866,6 +1914,9 @@ type Zone
     bool  sd
     bool  sr
     bool  fvg
+    bool  sfp        // swing-failure sweep (body crossed, close back inside)
+    float relVol     // signal-candle volume, % of its 20-bar average
+    bool  tap50      // Mean Threshold already tapped on this visit
     bool  flip       // S&R from a mitigated zone on the other side
     float ratio      // rejecting wick / body of the zone candle
     int   t0         // open time of the rejection candle
@@ -1907,22 +1958,37 @@ var int pfExp = 0
 
 // Reset every bar.
 pendArr = array.new_int(7, 0)        // +1 / -1 = wick through a zone-TF swing, awaiting a close
-fl      = array.new_bool(5, false)   // 0 new zone, 1 zone entered, 2 bull setup, 3 bear setup, 4 early HTF break
+fl      = array.new_bool(6, false)   // 0 new zone, 1 zone entered, 2 bull setup, 3 bear setup, 4 early HTF break, 5 50% tap
+
+// Alert session gate: Asia / London / NY from the Market Sessions group plus
+// the optional NY AM / PM windows (America/New_York). Daily+ charts pass.
+tNyAm = time(timeframe.period, i_nyAm, "America/New_York")
+tNyPm = time(timeframe.period, i_nyPm, "America/New_York")
+string rzSessName = i_alNyAm and not na(tNyAm) ? "NY AM" : i_alNyPm and not na(tNyPm) ? "NY PM" : i_alN and not na(nyT) ? "New York" : i_alL and not na(lonT) ? "London" : i_alA and not na(asiaT) ? "Asia" : "off-session"
+rzSessOk = not i_alSess or not timeframe.isintraday or rzSessName != "off-session"
+
+f_alertDyn(string msg) =>
+    if i_alDyn and rzSessOk and enableRZ
+        alert(msg + " · " + rzSessName, alert.freq_once_per_bar_close)
 
 // ============================================================================
 // ZONES
 // ============================================================================
 f_pending(Zone z) =>
-    not z.liq and not z.sr and not z.sd
+    not z.liq and not z.sfp and not z.sr and not z.sd
 
 f_tags(Zone z) =>
     string s = ""
     if z.liq
         s := "LIQ"
+    if z.sfp
+        s := s + (s == "" ? "" : "+") + "SFP"
     if z.sr
         s := s + (s == "" ? "" : "+") + (z.flip ? "S&R(flip)" : "S&R")
     if z.sd
         s := s + (s == "" ? "" : "+") + (z.fvg ? "S&D+FVG" : "S&D")
+    if s != "" and not na(z.relVol) and z.relVol >= i_volPct
+        s := s + "+VOL"
     s == "" ? "S&D?" : s
 
 f_zoneText(Zone z) =>
@@ -1932,7 +1998,7 @@ f_zoneText(Zone z) =>
 // 0-100: tags (65) + wick size (15) + displacement (15) + freshness (10).
 f_quality(Zone z) =>
     float a       = array.get(atrs, z.tfi)
-    float tagPts  = (z.liq ? 20.0 : 0.0) + (z.sr ? 20.0 : 0.0) + (z.sd ? 15.0 : 0.0) + (z.fvg ? 10.0 : 0.0)
+    float tagPts  = (z.liq ? 20.0 : z.sfp ? 15.0 : 0.0) + (z.sr ? 20.0 : 0.0) + (z.sd ? 15.0 : 0.0) + (z.fvg ? 10.0 : 0.0)
     float wickPts = na(z.ratio) ? 0.0 : 15.0 * math.min(z.ratio / (2.0 * i_wick), 1.0)
     float mv      = z.dir == 1 ? z.ext - z.top : z.bot - z.ext
     float dispPts = na(a) or a <= 0 ? 0.0 : 15.0 * math.min(math.max(mv, 0.0) / a / (2.0 * i_sdMult), 1.0)
@@ -1951,9 +2017,9 @@ f_zoneHalign(int i) =>
 f_zoneValign(int i) =>
     i == 0 ? text.align_top : i == 2 ? text.align_bottom : text.align_center
 
-// Quadrant price: 0% = wick tip, 100% = body edge.
+// Quadrant price: 0% = body edge, 50% = Mean Threshold, 100% = wick tip.
 f_qPrice(Zone z, float pct) =>
-    z.dir == 1 ? z.bot + (z.top - z.bot) * pct : z.top - (z.top - z.bot) * pct
+    z.dir == 1 ? z.top - (z.top - z.bot) * pct : z.bot + (z.top - z.bot) * pct
 
 f_undraw(Zone z) =>
     box.delete(z.bx)
@@ -2052,9 +2118,10 @@ f_pruneMit(int i) =>
             array.remove(zones, victim)
         cnt -= 1
 
-f_addZone(int i, int zd, float top, float bot, int tags, float ratio, int t0) =>
+f_addZone(int i, int zd, float top, float bot, int tags, float ratio, float relVol, int t0) =>
     if not na(top) and not na(bot) and top > bot and not na(t0)
-        bool liq  = tags == 1 or tags == 5
+        bool liq  = tags % 2 == 1
+        bool sfp  = tags == 2 or tags == 6
         bool sr   = tags >= 4
         bool flip = false
         // A new zone overlapping a mitigated zone from the other side is a
@@ -2062,12 +2129,13 @@ f_addZone(int i, int zd, float top, float bot, int tags, float ratio, int t0) =>
         for m in zones
             if m.mitig and m.dir == -zd and m.bot <= top and m.top >= bot
                 flip := true
-        Zone z = Zone.new(tfi = i, dir = zd, top = top, bot = bot, liq = liq, sd = false, sr = sr or flip, fvg = false, flip = flip and not sr, ratio = ratio, t0 = t0, born = time, ext = zd == 1 ? top : bot, visits = 0, armed = false, q = 0.0, inside = false, tapped = false, tapBar = na, wickThru = false, mitig = false, mitT = na, s4 = false, s5 = false, s6 = false, qLines = array.new<line>(), qLbls = array.new<label>())
+        Zone z = Zone.new(tfi = i, dir = zd, top = top, bot = bot, liq = liq, sd = false, sr = sr or flip, fvg = false, sfp = sfp, relVol = relVol, tap50 = false, flip = flip and not sr, ratio = ratio, t0 = t0, born = time, ext = zd == 1 ? top : bot, visits = 0, armed = false, q = 0.0, inside = false, tapped = false, tapBar = na, wickThru = false, mitig = false, mitT = na, s4 = false, s5 = false, s6 = false, qLines = array.new<line>(), qLbls = array.new<label>())
         z.q := f_quality(z)
         array.push(zones, z)
         f_prune(i, zd)
         if not f_pending(z) and z.q >= i_qSetup
             array.set(fl, 0, true)
+            f_alertDyn(str.format("New {0}{1} rejection zone ({2}, Q{3}) on {4}: {5} - {6}", array.get(names, i), zd == 1 ? " demand" : " supply", f_tags(z), str.tostring(math.round(z.q)), syminfo.ticker, str.tostring(z.bot, format.mintick), str.tostring(z.top, format.mintick)))
 
 f_markFvg(int i, int zd, int t1, int t2) =>
     if i_useFvg
@@ -2086,7 +2154,7 @@ if array.size(zones) > 0
             float nc   = f_nextClose(z.tfi)
             bool  dead = z.dir == 1 ? ((not na(own) and own < z.bot) or (not na(nc) and nc < z.bot)) : ((not na(own) and own > z.top) or (not na(nc) and nc > z.top))
             if dead
-                if i_keepMit > 0 and not f_pending(z)
+                if i_showMit and not f_pending(z)
                     f_undraw(z)
                     z.mitig  := true
                     z.mitT   := time
@@ -2114,12 +2182,22 @@ if array.size(zones) > 0
                         z.s4 := false
                         z.s5 := false
                         z.s6 := false
+                        z.tap50 := false
                         if not f_pending(z) and z.q >= i_qSetup
                             array.set(fl, 1, true)
+                            f_alertDyn(str.format("Price entered {0}{1} zone ({2}, Q{3}) on {4} at {5}", array.get(names, z.tfi), z.dir == 1 ? " demand" : " supply", f_tags(z), str.tostring(math.round(z.q)), syminfo.ticker, str.tostring(close, format.mintick)))
                     if touch
                         z.tapped := true
                         z.tapBar := bar_index
                     z.inside   := touch
+                    // 50% tap: a confirmed close crossing the Mean Threshold,
+                    // once per visit, on zones good enough for setups.
+                    float mt = f_qPrice(z, 0.5)
+                    if barstate.isconfirmed and z.armed and not z.tap50 and not f_pending(z) and z.q >= i_qSetup and ((close[1] < mt and close >= mt) or (close[1] > mt and close <= mt))
+                        z.tap50 := true
+                        array.set(fl, 5, true)
+                        if i_alTap
+                            f_alertDyn(str.format("50% tap of {0}{1} zone ({2}) on {3} at {4}", array.get(names, z.tfi), z.dir == 1 ? " demand" : " supply", f_tags(z), syminfo.ticker, str.tostring(mt, format.mintick)))
                     z.wickThru := z.dir == 1 ? low < z.bot : high > z.top
                     z.q        := f_quality(z)
         if remove
@@ -2172,6 +2250,7 @@ f_event(int i, int zd, bool choch, float lvl, int pivT, int evTime, bool early) 
     array.set(lastTxt, i, kind + " " + arrow + (early ? " (early)" : ""))
     if early
         array.set(fl, 4, true)
+        f_alertDyn(str.format("{0} {1} {2} confirmed early by the next TF down on {3} at {4}", array.get(names, i), kind, arrow, syminfo.ticker, str.tostring(lvl, format.mintick)))
 
     bool recent = bar_index >= last_bar_index - i_histBars
     bool draw   = recent and (i <= 3 ? i_showHtfStr : i_showLtfStr)
@@ -2201,8 +2280,9 @@ f_event(int i, int zd, bool choch, float lvl, int pivT, int evTime, bool early) 
         if not na(best)
             f_setFired(best, i)
             array.set(fl, zd == 1 ? 2 : 3, true)
+            f_alertDyn(str.format("{0} {1} {2} setup in {3}{4} zone ({5}, Q{6}) on {7} at {8}", array.get(names, i), kind, arrow, array.get(names, best.tfi), zd == 1 ? " demand" : " supply", f_tags(best), str.tostring(math.round(best.q)), syminfo.ticker, str.tostring(close, format.mintick)))
             if i_proof
-                float stp = f_qPrice(best, 0.0)
+                float stp = f_qPrice(best, 1.0)
                 float rsk = math.abs(close - stp)
                 if rsk > 0 and (zd == 1 ? close > stp : close < stp)
                     array.push(pfDir,  zd)
@@ -2219,7 +2299,7 @@ f_event(int i, int zd, bool choch, float lvl, int pivT, int evTime, bool early) 
 
 // One timeframe's chart-side step. Called unconditionally on every bar so the
 // [1] change tests inside see continuous history.
-f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC, float eL, int eP, int bT, float bTop, float bBot, int bTag, float bRat, int rT, float rTop, float rBot, int rTag, float rRat, int fu, int fuu, int fd, int fdd) =>
+f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC, float eL, int eP, int bT, float bTop, float bBot, int bTag, float bRat, float bVol, int rT, float rTop, float rBot, int rTag, float rRat, float rVol, int fu, int fuu, int fd, int fdd) =>
     bool newEv   = not na(eT) and (na(eT[1]) or eT != eT[1])
     bool newBull = not na(bT) and (na(bT[1]) or bT != bT[1])
     bool newBear = not na(rT) and (na(rT[1]) or rT != rT[1])
@@ -2229,9 +2309,9 @@ f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC,
     if array.get(isOn, i) and not live
         if i <= 3
             if newBull
-                f_addZone(i, 1, bTop, bBot, bTag, bRat, bT)
+                f_addZone(i, 1, bTop, bBot, bTag, bRat, bVol, bT)
             if newBear
-                f_addZone(i, -1, rTop, rBot, rTag, rRat, rT)
+                f_addZone(i, -1, rTop, rBot, rTag, rRat, rVol, rT)
             if newFu
                 f_markFvg(i, 1, fu, fuu)
             if newFd
@@ -2268,13 +2348,13 @@ f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC,
                     array.set(pendArr, i, -1)
 
 // Zone TFs first, highest to lowest, so structure-TF setups see this bar's zones.
-f_proc(0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, rT0, rTop0, rBot0, rTag0, rRat0, fu0, fuu0, fd0, fdd0)
-f_proc(1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, rT1, rTop1, rBot1, rTag1, rRat1, fu1, fuu1, fd1, fdd1)
-f_proc(2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, rT2, rTop2, rBot2, rTag2, rRat2, fu2, fuu2, fd2, fdd2)
-f_proc(3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, rT3, rTop3, rBot3, rTag3, rRat3, fu3, fuu3, fd3, fdd3)
-f_proc(4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, rT4, rTop4, rBot4, rTag4, rRat4, fu4, fuu4, fd4, fdd4)
-f_proc(5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, rT5, rTop5, rBot5, rTag5, rRat5, fu5, fuu5, fd5, fdd5)
-f_proc(6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, rT6, rTop6, rBot6, rTag6, rRat6, fu6, fuu6, fd6, fdd6)
+f_proc(0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, bVol0, rT0, rTop0, rBot0, rTag0, rRat0, rVol0, fu0, fuu0, fd0, fdd0)
+f_proc(1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, bVol1, rT1, rTop1, rBot1, rTag1, rRat1, rVol1, fu1, fuu1, fd1, fdd1)
+f_proc(2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, bVol2, rT2, rTop2, rBot2, rTag2, rRat2, rVol2, fu2, fuu2, fd2, fdd2)
+f_proc(3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, bVol3, rT3, rTop3, rBot3, rTag3, rRat3, rVol3, fu3, fuu3, fd3, fdd3)
+f_proc(4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, bVol4, rT4, rTop4, rBot4, rTag4, rRat4, rVol4, fu4, fuu4, fd4, fdd4)
+f_proc(5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, bVol5, rT5, rTop5, rBot5, rTag5, rRat5, rVol5, fu5, fuu5, fd5, fdd5)
+f_proc(6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, bVol6, rT6, rTop6, rBot6, rTag6, rRat6, rVol6, fu6, fuu6, fd6, fdd6)
 
 // Resolve open setup-proof trades on confirmed bars (from the bar after entry).
 if barstate.isconfirmed and array.size(pfDir) > 0
@@ -2383,10 +2463,9 @@ if barstate.islast
 // ============================================================================
 // ALERTS  (all gated by the optional session filter)
 // ============================================================================
-rzSessOk = not i_alSess or not timeframe.isintraday or (i_alA and not na(asiaT)) or (i_alL and not na(lonT)) or (i_alN and not na(nyT))
-
 alertcondition(rzSessOk and array.get(fl, 0), "RZ New HTF zone",          "A new HTF rejection zone formed at or above the setup quality threshold.")
 alertcondition(rzSessOk and array.get(fl, 1), "RZ Price entered zone",    "Price traded into an HTF rejection zone at or above the setup quality threshold.")
 alertcondition(rzSessOk and array.get(fl, 2), "RZ Bullish setup",         "4H/1H/5m bullish break after a tap of a high-quality HTF demand zone.")
 alertcondition(rzSessOk and array.get(fl, 3), "RZ Bearish setup",         "4H/1H/5m bearish break after a tap of a high-quality HTF supply zone.")
 alertcondition(rzSessOk and array.get(fl, 4), "RZ HTF wick break confirmed early", "A zone-TF wick break was confirmed by a close on the next timeframe down.")
+alertcondition(rzSessOk and i_alTap and array.get(fl, 5), "RZ 50% tap", "Mean Threshold of a high-quality HTF rejection zone tapped on {{ticker}} ({{interval}}) at {{close}}")

@@ -1,0 +1,541 @@
+//@version=6
+indicator("CM Rejection Blocks Pro", shorttitle = "CM RJB Pro", overlay = true,
+     max_boxes_count  = 500,
+     max_lines_count  = 500,
+     max_labels_count = 500)
+
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//
+// ============================================================================
+// CM REJECTION BLOCKS PRO
+// ----------------------------------------------------------------------------
+// A Rejection Block (RJB) marks where price grabbed liquidity with a wick and
+// was refused: the wick traded beyond a swing, the body did not.
+//
+// DETECTION (per timeframe, identical on the chart TF and every HTF source)
+//   1. Liquidity levels. Every confirmed pivot high (BSL) / pivot low (SSL) of
+//      "Swing Strength" bars each side is stored as a level.
+//   2. Wick-only sweep. A candle sweeps a level when its wick trades through
+//      it. It is a Rejection candidate only if the body stays on the near
+//      side of the level:
+//        bearish:  high > level  and  max(open, close) < level
+//        bullish:  low  < level  and  min(open, close) > level
+//      With "SFP Wick to RJB" on, a swing failure also qualifies: the wick
+//      trades through and the candle CLOSES back inside even though the body
+//      crossed the level.
+//      One-touch rule: any trade through a level consumes it, whether or not
+//      a block forms, so a level can never trigger twice.
+//   3. Three-candle signal wick. The candidate must be the middle candle of a
+//      three-candle group with the extreme wick (highest high / lowest low)
+//      and its body at the extreme (body top >= both neighbours' body tops
+//      for bearish, body bottom <= both neighbours' for bullish). Because the
+//      right-hand neighbour is needed, a block is confirmed when the candle
+//      AFTER the signal candle closes.
+//
+// ZONE
+//   Bearish: wick high (100%) down to body high (0%).
+//   Bullish: wick low  (100%) up to body low  (0%).
+//   50% = Mean Threshold, the primary reaction level.
+//   A confirmed close beyond the 100% wick tip invalidates the block
+//   (timeframe's own close for HTF blocks). Invalidated blocks are either
+//   deleted or kept faded ("Show mitigated blocks").
+//
+// ANTI-REPAINT
+//   Chart TF: blocks are only created on a confirmed bar.
+//   HTF: request.security() returns every value with a [1] offset and
+//   lookahead_on. That combination yields the last CLOSED HTF candle, fixed
+//   for the whole of the next HTF candle, so historical and live results
+//   agree. (lookahead_off without the offset would read the still-forming
+//   HTF candle and repaint.)
+//
+// Backtest before relying on it: check sweep behaviour on at least one
+// Forex pair (EURUSD), one crypto pair (BTCUSD) and one index (ES).
+// ============================================================================
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+const string G_GEN = "GENERAL"
+const string G_VIS = "VISUALS"
+const string G_QD  = "QUADRANTS"
+const string G_HTF = "HTF PROJECTION"
+const string G_ALR = "ALERTS"
+const string G_DSH = "DASHBOARD"
+
+i_strength = input.int(3, "Swing Strength", minval = 1, maxval = 10, group = G_GEN, tooltip = "Pivot bars each side that define a liquidity level.\n1 = Sensitive (scalping / SFPs)\n3 = Normal (standard structure)\n6 = Strict (major pivots only)")
+i_maxBox   = input.int(10, "Max Boxes Per Side", minval = 1, maxval = 50, group = G_GEN, tooltip = "Per source (chart TF and each HTF), only the closest N active bullish and N active bearish blocks are kept.")
+i_ctf      = input.bool(true, "Current Timeframe RJBs", group = G_GEN, tooltip = "Off removes all chart-timeframe blocks.")
+i_sfp      = input.bool(true, "SFP Wick to RJB", group = G_GEN, tooltip = "Also create a block from a swing failure: the wick sweeps the level and the candle closes back inside even though its body crossed the level.")
+i_bodyDir  = input.bool(false, "Body closes in trade direction", group = G_GEN, tooltip = "Bearish blocks need a red signal candle, bullish blocks a green one. Fewer, stronger blocks.")
+i_volPct   = input.int(100, "Volume validation (% of 20-bar avg)", minval = 10, maxval = 500, group = G_GEN, tooltip = "A block is volume-validated when its signal candle's volume is at least this % of the previous 20-bar average.")
+i_volReq   = input.bool(false, "Require volume validation", group = G_GEN, tooltip = "Off: volume is only reported. On: blocks without validation are not created. Symbols without volume are never filtered.")
+
+i_fill    = input.bool(true, "Show Box Fill", group = G_VIS, inline = "fill")
+i_fillT   = input.int(85, "Transparency", minval = 0, maxval = 100, group = G_VIS, inline = "fill")
+i_cBull   = input.color(color.new(#089981, 0), "Bullish", group = G_VIS, inline = "col")
+i_cBear   = input.color(color.new(#f23645, 0), "Bearish", group = G_VIS, inline = "col")
+i_extMode = input.string("Bars", "Extend", options = ["Bars", "Chart edge"], group = G_VIS, inline = "ext")
+i_extBars = input.int(30, "", minval = 1, maxval = 500, group = G_VIS, inline = "ext")
+i_showMit = input.bool(true, "Show mitigated blocks", group = G_VIS, inline = "mit", tooltip = "On: an invalidated block stays on the chart, faded and dotted, frozen where it broke. Off: it is deleted.")
+i_maxMit  = input.int(3, "keep", minval = 1, maxval = 20, group = G_VIS, inline = "mit")
+i_theme   = input.string("Auto", "Text theme", options = ["Auto", "Dark", "Light"], group = G_VIS, tooltip = "Auto reads the chart background and switches label text between white and dark.")
+i_lblSize = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal"], group = G_VIS)
+
+i_quads = input.bool(true, "Show quadrant levels", group = G_QD, tooltip = "0% = body edge, 50% = Mean Threshold, 100% = wick tip (invalidation).")
+i_q0    = input.bool(false, "0%  ", group = G_QD, inline = "q0")
+i_q0c   = input.color(color.gray, "", group = G_QD, inline = "q0")
+i_q0s   = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q0")
+i_q0w   = input.int(1, "", minval = 1, maxval = 4, group = G_QD, inline = "q0")
+i_q0l   = input.bool(false, "label", group = G_QD, inline = "q0")
+i_q25   = input.bool(true, "25% ", group = G_QD, inline = "q25")
+i_q25c  = input.color(color.gray, "", group = G_QD, inline = "q25")
+i_q25s  = input.string("Dotted", "", options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q25")
+i_q25w  = input.int(1, "", minval = 1, maxval = 4, group = G_QD, inline = "q25")
+i_q25l  = input.bool(false, "label", group = G_QD, inline = "q25")
+i_q50   = input.bool(true, "50% ", group = G_QD, inline = "q50")
+i_q50c  = input.color(color.orange, "", group = G_QD, inline = "q50")
+i_q50s  = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q50")
+i_q50w  = input.int(2, "", minval = 1, maxval = 4, group = G_QD, inline = "q50")
+i_q50l  = input.bool(true, "label", group = G_QD, inline = "q50")
+i_q75   = input.bool(true, "75% ", group = G_QD, inline = "q75")
+i_q75c  = input.color(color.gray, "", group = G_QD, inline = "q75")
+i_q75s  = input.string("Dotted", "", options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q75")
+i_q75w  = input.int(1, "", minval = 1, maxval = 4, group = G_QD, inline = "q75")
+i_q75l  = input.bool(false, "label", group = G_QD, inline = "q75")
+i_q100  = input.bool(false, "100%", group = G_QD, inline = "q100")
+i_q100c = input.color(color.gray, "", group = G_QD, inline = "q100")
+i_q100s = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q100")
+i_q100w = input.int(1, "", minval = 1, maxval = 4, group = G_QD, inline = "q100")
+i_q100l = input.bool(false, "label", group = G_QD, inline = "q100")
+
+i_h1on  = input.bool(true, "HTF 1", group = G_HTF, inline = "h1")
+i_h1tf  = input.timeframe("15", "", group = G_HTF, inline = "h1")
+i_h1bu  = input.color(color.new(#26a69a, 0), "", group = G_HTF, inline = "h1")
+i_h1be  = input.color(color.new(#ef5350, 0), "", group = G_HTF, inline = "h1")
+i_h2on  = input.bool(true, "HTF 2", group = G_HTF, inline = "h2")
+i_h2tf  = input.timeframe("60", "", group = G_HTF, inline = "h2")
+i_h2bu  = input.color(color.new(#00897b, 0), "", group = G_HTF, inline = "h2")
+i_h2be  = input.color(color.new(#e53935, 0), "", group = G_HTF, inline = "h2")
+i_h3on  = input.bool(true, "HTF 3", group = G_HTF, inline = "h3")
+i_h3tf  = input.timeframe("240", "", group = G_HTF, inline = "h3")
+i_h3bu  = input.color(color.new(#00695c, 0), "", group = G_HTF, inline = "h3")
+i_h3be  = input.color(color.new(#c62828, 0), "", group = G_HTF, inline = "h3")
+i_htfMax = input.int(2, "Max visible per HTF (per side)", minval = 1, maxval = 20, group = G_HTF)
+i_htfT   = input.int(90, "HTF fill transparency", minval = 0, maxval = 100, group = G_HTF)
+i_tfTag  = input.bool(true, "Timeframe tag on box", group = G_HTF, tooltip = "Prints e.g. '1H RJB' in the bottom-right of each HTF block.")
+
+i_alOn    = input.bool(true, "Enable alerts", group = G_ALR, tooltip = "Create one alert on this indicator with 'Any alert() function call'. Messages carry the direction, symbol, timeframe, price and session.")
+i_alForm  = input.bool(true, "Block formed", group = G_ALR, inline = "at")
+i_alTap   = input.bool(true, "50% tap", group = G_ALR, inline = "at")
+i_alSfp   = input.bool(true, "SFP confluence", group = G_ALR, inline = "at")
+i_sessF   = input.bool(false, "Only alert in session windows (New York time)", group = G_ALR, tooltip = "Ignored on daily and higher charts.")
+i_s1on    = input.bool(true, "", group = G_ALR, inline = "s1")
+i_s1      = input.session("0830-1100", "NY AM", group = G_ALR, inline = "s1")
+i_s2on    = input.bool(true, "", group = G_ALR, inline = "s2")
+i_s2      = input.session("1330-1600", "NY PM", group = G_ALR, inline = "s2")
+i_s3on    = input.bool(false, "", group = G_ALR, inline = "s3")
+i_s3      = input.session("0200-0500", "London", group = G_ALR, inline = "s3")
+
+i_dash    = input.bool(true, "Show dashboard", group = G_DSH)
+i_dashPos = input.string("Bottom Right", "Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = G_DSH)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+chartSec = timeframe.in_seconds(timeframe.period)
+chartMs  = chartSec * 1000
+
+f_lineStyle(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+
+f_tfName(simple string tf) =>
+    int s = timeframe.in_seconds(tf)
+    s >= 86400 ? (tf == "1D" or tf == "D" ? "D" : tf == "1W" or tf == "W" ? "W" : tf == "1M" or tf == "M" ? "M" : tf) :
+     s % 3600 == 0 ? str.tostring(s / 3600) + "H" : str.tostring(s / 60) + "m"
+
+// Text colour that stays readable on the chart background.
+f_textCol() =>
+    color bg  = chart.bg_color
+    float lum = 0.299 * color.r(bg) + 0.587 * color.g(bg) + 0.114 * color.b(bg)
+    i_theme == "Dark" ? color.white : i_theme == "Light" ? color.rgb(17, 24, 39) : lum > 128 ? color.rgb(17, 24, 39) : color.white
+
+// An HTF source must be above the chart TF; otherwise the chart TF is
+// requested in its place and the source is treated as off.
+f_htfOk(simple string tf) =>
+    timeframe.in_seconds(tf) > chartSec
+
+f_req(simple string tf) =>
+    timeframe.in_seconds(tf) > chartSec ? tf : timeframe.period
+
+// ============================================================================
+// DETECTION — one call per timeframe (chart TF directly, HTFs via security)
+// ----------------------------------------------------------------------------
+// Every ta.* call sits at the top of the function and runs on every bar, so
+// v6 lazy evaluation of the if-blocks below cannot skip a bar of history.
+// ============================================================================
+f_detect(simple int strength, simple bool useSfp, simple bool bodyDir, simple bool volReq, simple float volPct) =>
+    float pivH   = ta.pivothigh(high, strength, strength)
+    float pivL   = ta.pivotlow(low, strength, strength)
+    float volAvg = ta.sma(volume, 20)
+    float bodyHi = math.max(open, close)
+    float bodyLo = math.min(open, close)
+    float relVol = nz(volAvg[1]) > 0 ? 100.0 * volume / volAvg[1] : float(na)
+
+    var array<float> bslLevels = array.new_float()
+    var array<float> sslLevels = array.new_float()
+
+    // Wick-only sweep of any unswept level. Each level is consumed on the
+    // first trade through it (one-touch rule), block or not.
+    bool isWickSweepBear = false
+    bool isSfpBear       = false
+    if array.size(bslLevels) > 0
+        for k = array.size(bslLevels) - 1 to 0
+            float lvl = array.get(bslLevels, k)
+            if high > lvl
+                if bodyHi < lvl
+                    isWickSweepBear := true
+                else if close < lvl
+                    isSfpBear := true
+                array.remove(bslLevels, k)
+    bool isWickSweepBull = false
+    bool isSfpBull       = false
+    if array.size(sslLevels) > 0
+        for k = array.size(sslLevels) - 1 to 0
+            float lvl = array.get(sslLevels, k)
+            if low < lvl
+                if bodyLo > lvl
+                    isWickSweepBull := true
+                else if close > lvl
+                    isSfpBull := true
+                array.remove(sslLevels, k)
+
+    // New pivots become levels only after this bar's sweep test.
+    if not na(pivH)
+        array.push(bslLevels, pivH)
+        if array.size(bslLevels) > 20
+            array.shift(bslLevels)
+    if not na(pivL)
+        array.push(sslLevels, pivL)
+        if array.size(sslLevels) > 20
+            array.shift(sslLevels)
+
+    bool volOk    = not volReq or na(relVol) or relVol >= volPct
+    bool candBear = (isWickSweepBear or (useSfp and isSfpBear)) and (not bodyDir or close < open) and volOk
+    bool candBull = (isWickSweepBull or (useSfp and isSfpBull)) and (not bodyDir or close > open) and volOk
+
+    // Three-candle signal wick: yesterday's candidate is the middle candle.
+    bool signalWickBear = candBear[1] and high[1] > high[2] and high[1] > high and bodyHi[1] >= bodyHi[2] and bodyHi[1] >= bodyHi
+    bool signalWickBull = candBull[1] and low[1] < low[2] and low[1] < low and bodyLo[1] <= bodyLo[2] and bodyLo[1] <= bodyLo
+    bool sfpOnlyBear    = isSfpBear[1] and not isWickSweepBear[1]
+    bool sfpOnlyBull    = isSfpBull[1] and not isWickSweepBull[1]
+
+    [signalWickBear, time[1], high[1], bodyHi[1], sfpOnlyBear, relVol[1], signalWickBull, low[1], bodyLo[1], sfpOnlyBull]
+
+// HTF wrapper: remembers the latest block of each side and returns everything
+// with [1] for use with lookahead_on (= last CLOSED HTF candle, no repaint).
+f_htf(simple int strength, simple bool useSfp, simple bool bodyDir, simple bool volReq, simple float volPct) =>
+    [sBr, tSig, hiBr, bdBr, sfBr, vSig, sBl, loBl, bdBl, sfBl] = f_detect(strength, useSfp, bodyDir, volReq, volPct)
+    var int   brT   = na
+    var float brTop = na
+    var float brBot = na
+    var bool  brSfp = false
+    var float brVol = na
+    var int   blT   = na
+    var float blTop = na
+    var float blBot = na
+    var bool  blSfp = false
+    var float blVol = na
+    if sBr
+        brT   := tSig
+        brTop := hiBr
+        brBot := bdBr
+        brSfp := sfBr
+        brVol := vSig
+    if sBl
+        blT   := tSig
+        blTop := bdBl
+        blBot := loBl
+        blSfp := sfBl
+        blVol := vSig
+    [brT[1], brTop[1], brBot[1], brSfp[1], brVol[1], blT[1], blTop[1], blBot[1], blSfp[1], blVol[1], close[1]]
+
+// Chart TF.
+[cBrSig, cSigT, cBrTop, cBrBot, cBrSfp, cSigVol, cBlSig, cBlBot, cBlTop, cBlSfp] = f_detect(i_strength, i_sfp, i_bodyDir, i_volReq, i_volPct)
+
+// HTF sources.
+[h1BrT, h1BrTop, h1BrBot, h1BrSfp, h1BrVol, h1BlT, h1BlTop, h1BlBot, h1BlSfp, h1BlVol, h1Cl] = request.security(syminfo.tickerid, f_req(i_h1tf), f_htf(i_strength, i_sfp, i_bodyDir, i_volReq, i_volPct), lookahead = barmerge.lookahead_on)
+[h2BrT, h2BrTop, h2BrBot, h2BrSfp, h2BrVol, h2BlT, h2BlTop, h2BlBot, h2BlSfp, h2BlVol, h2Cl] = request.security(syminfo.tickerid, f_req(i_h2tf), f_htf(i_strength, i_sfp, i_bodyDir, i_volReq, i_volPct), lookahead = barmerge.lookahead_on)
+[h3BrT, h3BrTop, h3BrBot, h3BrSfp, h3BrVol, h3BlT, h3BlTop, h3BlBot, h3BlSfp, h3BlVol, h3Cl] = request.security(syminfo.tickerid, f_req(i_h3tf), f_htf(i_strength, i_sfp, i_bodyDir, i_volReq, i_volPct), lookahead = barmerge.lookahead_on)
+
+// Session windows (New York time), evaluated every bar.
+tS1 = time(timeframe.period, i_s1, "America/New_York")
+tS2 = time(timeframe.period, i_s2, "America/New_York")
+tS3 = time(timeframe.period, i_s3, "America/New_York")
+string sessName = i_s1on and not na(tS1) ? "NY AM" : i_s2on and not na(tS2) ? "NY PM" : i_s3on and not na(tS3) ? "London" : "Off-session"
+bool   sessOk   = not i_sessF or not timeframe.isintraday or sessName != "Off-session"
+
+// ============================================================================
+// STATE
+// ============================================================================
+type RJB
+    int   src        // 0 = chart TF, 1-3 = HTF source
+    int   dir        // 1 = bullish, -1 = bearish
+    float top
+    float bot
+    int   t0         // open time of the signal candle
+    bool  sfp
+    float relVol
+    int   state      // 0 active, 1 tapped, 2 mitigated, 3 invalidated (deleted)
+    int   mitT
+    bool  armed      // price has left the block since it formed
+    bool  inside
+    bool  tapped50   // 50% already tapped on this visit
+    box   bx
+    array<line>  ql
+    array<label> qlb
+
+var array<RJB>    blocks  = array.new<RJB>()
+var array<RJB>    recent  = array.new<RJB>()   // last 3 HTF blocks, for the dashboard
+var array<string> srcName = array.from("Chart", f_tfName(i_h1tf), f_tfName(i_h2tf), f_tfName(i_h3tf))
+var array<bool>   srcOn   = array.from(i_ctf, i_h1on and f_htfOk(i_h1tf), i_h2on and f_htfOk(i_h2tf), i_h3on and f_htfOk(i_h3tf))
+var array<color>  srcBu   = array.from(i_cBull, i_h1bu, i_h2bu, i_h3bu)
+var array<color>  srcBe   = array.from(i_cBear, i_h1be, i_h2be, i_h3be)
+
+var array<float>  qPct = array.from(0.0, 0.25, 0.5, 0.75, 1.0)
+var array<bool>   qOn  = array.from(i_q0, i_q25, i_q50, i_q75, i_q100)
+var array<color>  qCol = array.from(i_q0c, i_q25c, i_q50c, i_q75c, i_q100c)
+var array<string> qSty = array.from(i_q0s, i_q25s, i_q50s, i_q75s, i_q100s)
+var array<int>    qWid = array.from(i_q0w, i_q25w, i_q50w, i_q75w, i_q100w)
+var array<bool>   qLbl = array.from(i_q0l, i_q25l, i_q50l, i_q75l, i_q100l)
+
+// Last confirmed close per source: the chart's, then each HTF's own.
+srcClose = array.from(barstate.isconfirmed ? close : float(na), h1Cl, h2Cl, h3Cl)
+
+// Per-bar signal flags for alertcondition(): 0 bull formed, 1 bear formed, 2 50% tap.
+fl = array.new_bool(3, false)
+
+// ============================================================================
+// BLOCK MANAGEMENT
+// ============================================================================
+// Quadrant price: 0% = body edge, 100% = wick tip.
+f_qPrice(RJB b, float pct) =>
+    b.dir == 1 ? b.top - (b.top - b.bot) * pct : b.bot + (b.top - b.bot) * pct
+
+f_meanThreshold(RJB b) =>
+    f_qPrice(b, 0.5)
+
+f_srcLabel(RJB b) =>
+    b.src == 0 ? f_tfName(timeframe.period) : array.get(srcName, b.src)
+
+f_undraw(RJB b) =>
+    box.delete(b.bx)
+    b.bx := na
+    for ln in b.ql
+        line.delete(ln)
+    array.clear(b.ql)
+    for lb in b.qlb
+        label.delete(lb)
+    array.clear(b.qlb)
+
+f_draw(RJB b) =>
+    color c     = b.dir == 1 ? array.get(srcBu, b.src) : array.get(srcBe, b.src)
+    bool  mit   = b.state == 2
+    bool  edge  = i_extMode == "Chart edge" and not mit
+    int   rt    = mit ? b.mitT : time + i_extBars * chartMs
+    int   baseT = b.src == 0 ? i_fillT : i_htfT
+    int   fillT = not i_fill ? 100 : mit ? math.max(baseT, 95) : baseT
+    string tag  = b.src > 0 and i_tfTag ? f_srcLabel(b) + " RJB" + (b.sfp ? " · SFP" : "") + (mit ? " · mitigated" : "") : ""
+    b.bx := box.new(b.t0, b.top, rt, b.bot, xloc = xloc.bar_time,
+         bgcolor = color.new(c, fillT), border_color = color.new(c, mit ? 65 : 0),
+         border_width = b.src == 0 ? 1 : 2, border_style = mit ? line.style_dotted : line.style_solid,
+         extend = edge ? extend.right : extend.none,
+         text = tag, text_size = size.tiny, text_color = mit ? color.new(c, 40) : c,
+         text_halign = text.align_right, text_valign = text.align_bottom)
+    if i_quads and not mit
+        color tc = f_textCol()
+        for k = 0 to 4
+            if array.get(qOn, k)
+                float y = f_qPrice(b, array.get(qPct, k))
+                array.push(b.ql, line.new(b.t0, y, rt, y, xloc = xloc.bar_time, extend = edge ? extend.right : extend.none, color = array.get(qCol, k), style = f_lineStyle(array.get(qSty, k)), width = array.get(qWid, k)))
+                if array.get(qLbl, k)
+                    array.push(b.qlb, label.new(rt, y, str.tostring(array.get(qPct, k) * 100, "#") + "%  " + str.tostring(y, format.mintick), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = tc, size = f_size(i_lblSize)))
+    b
+
+// Closest N active blocks per source and side survive.
+f_prune(int src, int d) =>
+    int cap = src == 0 ? i_maxBox : i_htfMax
+    int cnt = 0
+    for b in blocks
+        if b.src == src and b.dir == d and b.state < 2
+            cnt += 1
+    while cnt > cap
+        int   victim = -1
+        float worst  = -1.0
+        for j = 0 to array.size(blocks) - 1
+            RJB b = array.get(blocks, j)
+            if b.src == src and b.dir == d and b.state < 2
+                float dist = math.abs((b.top + b.bot) / 2 - close)
+                if dist > worst
+                    victim := j
+                    worst  := dist
+        if victim >= 0
+            RJB v = array.get(blocks, victim)
+            f_undraw(v)
+            v.state := 3
+            array.remove(blocks, victim)
+        cnt -= 1
+
+// Oldest mitigated blocks beyond the allowance are deleted.
+f_pruneMit(int src) =>
+    int cnt = 0
+    for b in blocks
+        if b.src == src and b.state == 2
+            cnt += 1
+    while cnt > i_maxMit
+        int victim = -1
+        int oldest = na
+        for j = 0 to array.size(blocks) - 1
+            RJB b = array.get(blocks, j)
+            if b.src == src and b.state == 2
+                if victim < 0 or b.mitT < oldest
+                    victim := j
+                    oldest := b.mitT
+        if victim >= 0
+            f_undraw(array.get(blocks, victim))
+            array.remove(blocks, victim)
+        cnt -= 1
+
+f_alert(string msg) =>
+    if i_alOn and sessOk
+        alert(msg + " · " + sessName, alert.freq_once_per_bar_close)
+
+f_add(int src, int d, float top, float bot, int t0, bool sfp, float relVol) =>
+    if not na(top) and not na(bot) and top > bot and not na(t0) and array.get(srcOn, src)
+        RJB b = RJB.new(src = src, dir = d, top = top, bot = bot, t0 = t0, sfp = sfp, relVol = relVol, state = 0, mitT = na, armed = false, inside = false, tapped50 = false, ql = array.new<line>(), qlb = array.new<label>())
+        array.push(blocks, b)
+        f_prune(src, d)
+        array.set(fl, d == 1 ? 0 : 1, true)
+        if src > 0
+            array.push(recent, b)
+            if array.size(recent) > 3
+                array.shift(recent)
+        string sideTxt = d == 1 ? "Bullish" : "Bearish"
+        string priceTx = str.tostring(d == 1 ? bot : top, format.mintick)
+        if i_alForm
+            f_alert(str.format("New {0} {1} Rejection Block on {2} at {3} (zone {4} – {5})", f_srcLabel(b), sideTxt, syminfo.ticker, priceTx, str.tostring(bot, format.mintick), str.tostring(top, format.mintick)))
+        if i_alSfp and sfp
+            f_alert(str.format("SFP confluence: {0} {1} Rejection Block from a swing failure on {2} at {3}", f_srcLabel(b), sideTxt, syminfo.ticker, priceTx))
+
+// Called every bar so the [1] change tests see continuous history.
+f_procHtf(int src, int brT, float brTop, float brBot, bool brSfp, float brVol, int blT, float blTop, float blBot, bool blSfp, float blVol) =>
+    bool newBr = not na(brT) and (na(brT[1]) or brT != brT[1])
+    bool newBl = not na(blT) and (na(blT[1]) or blT != blT[1])
+    if newBr
+        f_add(src, -1, brTop, brBot, brT, brSfp, brVol)
+    if newBl
+        f_add(src, 1, blTop, blBot, blT, blSfp, blVol)
+
+// ── Create ──────────────────────────────────────────────────────────────────
+if barstate.isconfirmed
+    if cBrSig
+        f_add(0, -1, cBrTop, cBrBot, cSigT, cBrSfp, cSigVol)
+    if cBlSig
+        f_add(0, 1, cBlTop, cBlBot, cSigT, cBlSfp, cSigVol)
+f_procHtf(1, h1BrT, h1BrTop, h1BrBot, h1BrSfp, h1BrVol, h1BlT, h1BlTop, h1BlBot, h1BlSfp, h1BlVol)
+f_procHtf(2, h2BrT, h2BrTop, h2BrBot, h2BrSfp, h2BrVol, h2BlT, h2BlTop, h2BlBot, h2BlSfp, h2BlVol)
+f_procHtf(3, h3BrT, h3BrTop, h3BrBot, h3BrSfp, h3BrVol, h3BlT, h3BlTop, h3BlBot, h3BlSfp, h3BlVol)
+
+// ── Update: invalidation, taps, 50% tap, drawing ────────────────────────────
+if array.size(blocks) > 0
+    for j = array.size(blocks) - 1 to 0
+        RJB  b      = array.get(blocks, j)
+        bool remove = not array.get(srcOn, b.src)
+        if b.state < 2 and not remove
+            float sc   = array.get(srcClose, b.src)
+            bool  dead = not na(sc) and (b.dir == 1 ? sc < b.bot : sc > b.top)
+            if dead
+                if i_showMit
+                    f_undraw(b)
+                    b.state  := 2
+                    b.mitT   := time
+                    b.inside := false
+                else
+                    remove := true
+            else
+                if not b.armed
+                    b.armed := b.dir == 1 ? low > b.top : high < b.bot
+                bool touch = b.armed and (b.dir == 1 ? low <= b.top : high >= b.bot)
+                if touch and not b.inside
+                    b.tapped50 := false
+                if touch
+                    b.state := 1
+                b.inside := touch
+                // 50% tap: a confirmed close crossing the Mean Threshold, once per visit.
+                float mt = f_meanThreshold(b)
+                if barstate.isconfirmed and b.armed and not b.tapped50 and ((close[1] < mt and close >= mt) or (close[1] > mt and close <= mt))
+                    b.tapped50 := true
+                    array.set(fl, 2, true)
+                    if i_alTap
+                        f_alert(str.format("50% tap of {0} {1} Rejection Block on {2} at {3}", f_srcLabel(b), b.dir == 1 ? "Bullish" : "Bearish", syminfo.ticker, str.tostring(mt, format.mintick)))
+        if remove
+            f_undraw(b)
+            b.state := 3
+            array.remove(blocks, j)
+        // Drawing only happens on the last bar: history needs only the final
+        // state, which keeps object churn (and load time) low.
+        else if barstate.islast
+            if na(b.bx)
+                f_draw(b)
+            else if b.state < 2 and i_extMode == "Bars"
+                int rt = time + i_extBars * chartMs
+                box.set_right(b.bx, rt)
+                for ln in b.ql
+                    line.set_x2(ln, rt)
+                for lb in b.qlb
+                    label.set_x(lb, rt)
+
+for s = 0 to 3
+    f_pruneMit(s)
+
+// ============================================================================
+// DASHBOARD — last 3 HTF blocks
+// ============================================================================
+f_dashPos(string s) =>
+    s == "Top Left" ? position.top_left : s == "Top Right" ? position.top_right : s == "Bottom Left" ? position.bottom_left : position.bottom_right
+
+var table dash = table.new(f_dashPos(i_dashPos), 5, 4, bgcolor = color.new(color.black, 75), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+
+if barstate.islast
+    table.clear(dash, 0, 0, 4, 3)
+    if i_dash
+        color tc = f_textCol()
+        color hd = color.new(color.gray, 55)
+        table.cell(dash, 0, 0, "HTF",    text_color = tc, bgcolor = hd, text_size = size.small)
+        table.cell(dash, 1, 0, "Side",   text_color = tc, bgcolor = hd, text_size = size.small)
+        table.cell(dash, 2, 0, "Status", text_color = tc, bgcolor = hd, text_size = size.small)
+        table.cell(dash, 3, 0, "Volume", text_color = tc, bgcolor = hd, text_size = size.small)
+        table.cell(dash, 4, 0, "SFP",    text_color = tc, bgcolor = hd, text_size = size.small)
+        int n = array.size(recent)
+        if n == 0
+            table.cell(dash, 0, 1, "no HTF blocks yet", text_color = color.gray, text_size = size.small)
+        else
+            for r = 0 to n - 1
+                RJB    b   = array.get(recent, n - 1 - r)
+                string st  = b.state == 0 ? "Active" : b.state == 1 ? "Tapped" : b.state == 2 ? "Mitigated" : "Invalidated"
+                color  stc = b.state == 0 ? color.silver : b.state == 1 ? color.orange : color.gray
+                string vol = na(b.relVol) ? "n/a" : (b.relVol >= i_volPct ? "✓ " : "✗ ") + str.tostring(b.relVol, "#") + "%"
+                table.cell(dash, 0, r + 1, array.get(srcName, b.src), text_color = tc, text_size = size.small)
+                table.cell(dash, 1, r + 1, b.dir == 1 ? "Bull" : "Bear", text_color = b.dir == 1 ? i_cBull : i_cBear, text_size = size.small)
+                table.cell(dash, 2, r + 1, st, text_color = stc, text_size = size.small)
+                table.cell(dash, 3, r + 1, vol, text_color = na(b.relVol) ? color.gray : b.relVol >= i_volPct ? i_cBull : color.gray, text_size = size.small)
+                table.cell(dash, 4, r + 1, b.sfp ? "yes" : "—", text_color = tc, text_size = size.small)
+
+// ============================================================================
+// ALERTCONDITIONS (manual alerts with TradingView placeholders)
+// ============================================================================
+alertcondition(array.get(fl, 0), "Bullish Rejection Block formed", "Bullish Rejection Block on {{ticker}} ({{interval}}) at {{close}}")
+alertcondition(array.get(fl, 1), "Bearish Rejection Block formed", "Bearish Rejection Block on {{ticker}} ({{interval}}) at {{close}}")
+alertcondition(array.get(fl, 2), "Rejection Block 50% tap",        "Rejection Block Mean Threshold tapped on {{ticker}} ({{interval}}) at {{close}}")
