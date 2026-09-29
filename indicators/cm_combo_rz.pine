@@ -1545,6 +1545,8 @@ alertcondition(enableAtrSltp and sltpTp3Crossed, title="Price crossed TP3", mess
 // ============================================================================
 // INPUTS
 // ============================================================================
+// Shown in the dashboard's top-left cell so the running version is obvious.
+const string RZ_VERSION = "v10"
 const string G_TF  = "RZ ▸ Timeframes"
 const string G_DET = "RZ ▸ Zone detection"
 const string G_QLT = "RZ ▸ Zone quality"
@@ -2502,7 +2504,7 @@ if barstate.islast
         color tc    = f_textCol()
         color tcDim = color.new(tc, 25)
         table.set_bgcolor(dash, f_isLight() ? color.new(color.white, 25) : color.new(color.black, 70))
-        table.cell(dash, 0, 0, "TF",         text_color = tc, bgcolor = hdr, text_size = dsz)
+        table.cell(dash, 0, 0, "RZ " + RZ_VERSION, text_color = tc, bgcolor = hdr, text_size = dsz)
         table.cell(dash, 1, 0, "Bias",       text_color = tc, bgcolor = hdr, text_size = dsz)
         table.cell(dash, 2, 0, "Last break", text_color = tc, bgcolor = hdr, text_size = dsz)
         table.cell(dash, 3, 0, "Nearest zone (ATR away, quality)", text_color = tc, bgcolor = hdr, text_size = dsz)
