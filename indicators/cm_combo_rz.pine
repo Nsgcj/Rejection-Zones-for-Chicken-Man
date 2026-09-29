@@ -1579,7 +1579,7 @@ i_useSfp = input.bool(true, "SFP Wick to zone",                  group = G_DET, 
 i_volPct = input.int(100, "Volume validation (% of 20-bar avg)", group = G_DET, minval = 10, maxval = 500, tooltip = "A zone whose signal candle traded at least this % of the previous 20-bar average volume (on the zone timeframe) gets a VOL tag. Informational; symbols without volume show nothing.")
 i_useFvg = input.bool(true, "FVG strengthens S&D",                group = G_DET, tooltip = "A zone whose rejection candle (or the candle after it) starts a fair value gap on the zone timeframe gets the S&D+FVG tag and extra quality points.")
 
-i_qShow  = input.int(40, "Min quality to draw",                   group = G_QLT, minval = 0, maxval = 100, tooltip = "Zones scoring below this are tracked but not drawn and not counted in the dashboard.")
+i_qShow  = input.int(30, "Min quality to draw",                   group = G_QLT, minval = 0, maxval = 100, tooltip = "Zones scoring below this are tracked but not drawn and not counted in the dashboard.")
 i_qSetup = input.int(60, "Min quality for setups & alerts",       group = G_QLT, minval = 0, maxval = 100, tooltip = "Setup labels and all zone alerts need a zone at or above this score.")
 i_showQ  = input.bool(true, "Show score on zone labels",          group = G_QLT, tooltip = "Score (0-100):\n• Tags: LIQ 20 (or SFP 15), S&R 20, S&D 15, FVG 10\n• Wick size: up to 15 (full at 2× the wick-to-body ratio)\n• Displacement: up to 15 (full at 2× the S&D displacement)\n• Freshness: 10 untouched, -4 per visit, -5 while price is wicking through the tip")
 
@@ -1812,6 +1812,10 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol, simple int o
     var int   zBearTags = 0
     var float zBearRat  = na
     var float zBearVol  = na
+    // Furthest price reached away from the zone by the confirming candle, so
+    // the displacement it already made counts toward S&D and quality.
+    var float zBullExt  = na
+    var float zBearExt  = na
 
     if sigBear
         zBearT    := time[1]
@@ -1820,6 +1824,7 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol, simple int o
         zBearTags := tagBear[1]
         zBearRat  := upW[1] / body[1]
         zBearVol  := relVol[1]
+        zBearExt  := low
     if sigBull
         zBullT    := time[1]
         zBullTop  := bodyLo[1]
@@ -1827,6 +1832,7 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol, simple int o
         zBullTags := tagBull[1]
         zBullRat  := dnW[1] / body[1]
         zBullVol  := relVol[1]
+        zBullExt  := high
 
     // ── Fair value gaps: origin candle [2] (or [3]) and the current bar ──
     var int fvgUpT  = na
@@ -1860,18 +1866,18 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol, simple int o
         if array.size(pLs) > 10
             array.shift(pLs)
 
-    [close[off], atrV[off], swH[off], swL[off], swHT[off], swLT[off], evT[off], evDir[off], evChoch[off], evLvl[off], evPivT[off], zBullT[off], zBullTop[off], zBullBot[off], zBullTags[off], zBullRat[off], zBullVol[off], zBearT[off], zBearTop[off], zBearBot[off], zBearTags[off], zBearRat[off], zBearVol[off], fvgUpT[off], fvgUpT2[off], fvgDnT[off], fvgDnT2[off]]
+    [close[off], atrV[off], swH[off], swL[off], swHT[off], swLT[off], evT[off], evDir[off], evChoch[off], evLvl[off], evPivT[off], zBullT[off], zBullTop[off], zBullBot[off], zBullTags[off], zBullRat[off], zBullVol[off], zBullExt[off], zBearT[off], zBearTop[off], zBearBot[off], zBearTags[off], zBearRat[off], zBearVol[off], zBearExt[off], fvgUpT[off], fvgUpT2[off], fvgDnT[off], fvgDnT2[off]]
 
 f_off(simple string tf) =>
     timeframe.in_seconds(tf) == chartSec ? 0 : 1
 
-[c0, a0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, bVol0, rT0, rTop0, rBot0, rTag0, rRat0, rVol0, fu0, fuu0, fd0, fdd0] = request.security(syminfo.tickerid, f_req(i_tf0), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf0)), lookahead = barmerge.lookahead_on)
-[c1, a1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, bVol1, rT1, rTop1, rBot1, rTag1, rRat1, rVol1, fu1, fuu1, fd1, fdd1] = request.security(syminfo.tickerid, f_req(i_tf1), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf1)), lookahead = barmerge.lookahead_on)
-[c2, a2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, bVol2, rT2, rTop2, rBot2, rTag2, rRat2, rVol2, fu2, fuu2, fd2, fdd2] = request.security(syminfo.tickerid, f_req(i_tf2), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf2)), lookahead = barmerge.lookahead_on)
-[c3, a3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, bVol3, rT3, rTop3, rBot3, rTag3, rRat3, rVol3, fu3, fuu3, fd3, fdd3] = request.security(syminfo.tickerid, f_req(i_tf3), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf3)), lookahead = barmerge.lookahead_on)
-[c4, a4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, bVol4, rT4, rTop4, rBot4, rTag4, rRat4, rVol4, fu4, fuu4, fd4, fdd4] = request.security(syminfo.tickerid, f_req(i_tf4), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf4)), lookahead = barmerge.lookahead_on)
-[c5, a5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, bVol5, rT5, rTop5, rBot5, rTag5, rRat5, rVol5, fu5, fuu5, fd5, fdd5] = request.security(syminfo.tickerid, f_req(i_tf5), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf5)), lookahead = barmerge.lookahead_on)
-[c6, a6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, bVol6, rT6, rTop6, rBot6, rTag6, rRat6, rVol6, fu6, fuu6, fd6, fdd6] = request.security(syminfo.tickerid, f_req(i_tf6), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf6)), lookahead = barmerge.lookahead_on)
+[c0, a0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, bVol0, bExt0, rT0, rTop0, rBot0, rTag0, rRat0, rVol0, rExt0, fu0, fuu0, fd0, fdd0] = request.security(syminfo.tickerid, f_req(i_tf0), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf0)), lookahead = barmerge.lookahead_on)
+[c1, a1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, bVol1, bExt1, rT1, rTop1, rBot1, rTag1, rRat1, rVol1, rExt1, fu1, fuu1, fd1, fdd1] = request.security(syminfo.tickerid, f_req(i_tf1), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf1)), lookahead = barmerge.lookahead_on)
+[c2, a2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, bVol2, bExt2, rT2, rTop2, rBot2, rTag2, rRat2, rVol2, rExt2, fu2, fuu2, fd2, fdd2] = request.security(syminfo.tickerid, f_req(i_tf2), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf2)), lookahead = barmerge.lookahead_on)
+[c3, a3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, bVol3, bExt3, rT3, rTop3, rBot3, rTag3, rRat3, rVol3, rExt3, fu3, fuu3, fd3, fdd3] = request.security(syminfo.tickerid, f_req(i_tf3), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf3)), lookahead = barmerge.lookahead_on)
+[c4, a4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, bVol4, bExt4, rT4, rTop4, rBot4, rTag4, rRat4, rVol4, rExt4, fu4, fuu4, fd4, fdd4] = request.security(syminfo.tickerid, f_req(i_tf4), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf4)), lookahead = barmerge.lookahead_on)
+[c5, a5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, bVol5, bExt5, rT5, rTop5, rBot5, rTag5, rRat5, rVol5, rExt5, fu5, fuu5, fd5, fdd5] = request.security(syminfo.tickerid, f_req(i_tf5), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf5)), lookahead = barmerge.lookahead_on)
+[c6, a6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, bVol6, bExt6, rT6, rTop6, rBot6, rTag6, rRat6, rVol6, rExt6, fu6, fuu6, fd6, fdd6] = request.security(syminfo.tickerid, f_req(i_tf6), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf6)), lookahead = barmerge.lookahead_on)
 
 // ============================================================================
 // PER-TIMEFRAME LOOKUPS  (index 0-3 = zone TFs, 4-6 = structure TFs)
@@ -2118,7 +2124,7 @@ f_pruneMit(int i) =>
             array.remove(zones, victim)
         cnt -= 1
 
-f_addZone(int i, int zd, float top, float bot, int tags, float ratio, float relVol, int t0) =>
+f_addZone(int i, int zd, float top, float bot, int tags, float ratio, float relVol, float extIn, int t0) =>
     if not na(top) and not na(bot) and top > bot and not na(t0)
         bool liq  = tags % 2 == 1
         bool sfp  = tags == 2 or tags == 6
@@ -2129,7 +2135,11 @@ f_addZone(int i, int zd, float top, float bot, int tags, float ratio, float relV
         for m in zones
             if m.mitig and m.dir == -zd and m.bot <= top and m.top >= bot
                 flip := true
-        Zone z = Zone.new(tfi = i, dir = zd, top = top, bot = bot, liq = liq, sd = false, sr = sr or flip, fvg = false, sfp = sfp, relVol = relVol, tap50 = false, flip = flip and not sr, ratio = ratio, t0 = t0, born = time, ext = zd == 1 ? top : bot, visits = 0, armed = false, q = 0.0, inside = false, tapped = false, tapBar = na, wickThru = false, mitig = false, mitT = na, s4 = false, s5 = false, s6 = false, qLines = array.new<line>(), qLbls = array.new<label>())
+        Zone z = Zone.new(tfi = i, dir = zd, top = top, bot = bot, liq = liq, sd = false, sr = sr or flip, fvg = false, sfp = sfp, relVol = relVol, tap50 = false, flip = flip and not sr, ratio = ratio, t0 = t0, born = time, ext = zd == 1 ? math.max(top, nz(extIn, top)) : math.min(bot, nz(extIn, bot)), visits = 0, armed = false, q = 0.0, inside = false, tapped = false, tapBar = na, wickThru = false, mitig = false, mitT = na, s4 = false, s5 = false, s6 = false, qLines = array.new<line>(), qLbls = array.new<label>())
+        float za = array.get(atrs, i)
+        float zmv = zd == 1 ? z.ext - top : bot - z.ext
+        if not na(za) and za > 0 and zmv >= i_sdMult * za
+            z.sd := true
         z.q := f_quality(z)
         array.push(zones, z)
         f_prune(i, zd)
@@ -2299,7 +2309,7 @@ f_event(int i, int zd, bool choch, float lvl, int pivT, int evTime, bool early) 
 
 // One timeframe's chart-side step. Called unconditionally on every bar so the
 // [1] change tests inside see continuous history.
-f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC, float eL, int eP, int bT, float bTop, float bBot, int bTag, float bRat, float bVol, int rT, float rTop, float rBot, int rTag, float rRat, float rVol, int fu, int fuu, int fd, int fdd) =>
+f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC, float eL, int eP, int bT, float bTop, float bBot, int bTag, float bRat, float bVol, float bExt, int rT, float rTop, float rBot, int rTag, float rRat, float rVol, float rExt, int fu, int fuu, int fd, int fdd) =>
     bool newEv   = not na(eT) and (na(eT[1]) or eT != eT[1])
     bool newBull = not na(bT) and (na(bT[1]) or bT != bT[1])
     bool newBear = not na(rT) and (na(rT[1]) or rT != rT[1])
@@ -2309,9 +2319,9 @@ f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC,
     if array.get(isOn, i) and not live
         if i <= 3
             if newBull
-                f_addZone(i, 1, bTop, bBot, bTag, bRat, bVol, bT)
+                f_addZone(i, 1, bTop, bBot, bTag, bRat, bVol, bExt, bT)
             if newBear
-                f_addZone(i, -1, rTop, rBot, rTag, rRat, rVol, rT)
+                f_addZone(i, -1, rTop, rBot, rTag, rRat, rVol, rExt, rT)
             if newFu
                 f_markFvg(i, 1, fu, fuu)
             if newFd
@@ -2348,13 +2358,13 @@ f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC,
                     array.set(pendArr, i, -1)
 
 // Zone TFs first, highest to lowest, so structure-TF setups see this bar's zones.
-f_proc(0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, bVol0, rT0, rTop0, rBot0, rTag0, rRat0, rVol0, fu0, fuu0, fd0, fdd0)
-f_proc(1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, bVol1, rT1, rTop1, rBot1, rTag1, rRat1, rVol1, fu1, fuu1, fd1, fdd1)
-f_proc(2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, bVol2, rT2, rTop2, rBot2, rTag2, rRat2, rVol2, fu2, fuu2, fd2, fdd2)
-f_proc(3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, bVol3, rT3, rTop3, rBot3, rTag3, rRat3, rVol3, fu3, fuu3, fd3, fdd3)
-f_proc(4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, bVol4, rT4, rTop4, rBot4, rTag4, rRat4, rVol4, fu4, fuu4, fd4, fdd4)
-f_proc(5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, bVol5, rT5, rTop5, rBot5, rTag5, rRat5, rVol5, fu5, fuu5, fd5, fdd5)
-f_proc(6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, bVol6, rT6, rTop6, rBot6, rTag6, rRat6, rVol6, fu6, fuu6, fd6, fdd6)
+f_proc(0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, bVol0, bExt0, rT0, rTop0, rBot0, rTag0, rRat0, rVol0, rExt0, fu0, fuu0, fd0, fdd0)
+f_proc(1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, bVol1, bExt1, rT1, rTop1, rBot1, rTag1, rRat1, rVol1, rExt1, fu1, fuu1, fd1, fdd1)
+f_proc(2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, bVol2, bExt2, rT2, rTop2, rBot2, rTag2, rRat2, rVol2, rExt2, fu2, fuu2, fd2, fdd2)
+f_proc(3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, bVol3, bExt3, rT3, rTop3, rBot3, rTag3, rRat3, rVol3, rExt3, fu3, fuu3, fd3, fdd3)
+f_proc(4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, bVol4, bExt4, rT4, rTop4, rBot4, rTag4, rRat4, rVol4, rExt4, fu4, fuu4, fd4, fdd4)
+f_proc(5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, bVol5, bExt5, rT5, rTop5, rBot5, rTag5, rRat5, rVol5, rExt5, fu5, fuu5, fd5, fdd5)
+f_proc(6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, bVol6, bExt6, rT6, rTop6, rBot6, rTag6, rRat6, rVol6, rExt6, fu6, fuu6, fd6, fdd6)
 
 // Resolve open setup-proof trades on confirmed bars (from the bar after entry).
 if barstate.isconfirmed and array.size(pfDir) > 0
@@ -2403,7 +2413,10 @@ f_zoneStatus(int i) =>
     float  qUp   = na
     float  qDn   = na
     float  a     = array.get(atrs, i)
+    int    nHid  = 0
     for z in zones
+        if z.tfi == i and not z.mitig and (f_pending(z) or z.q < i_qShow)
+            nHid += 1
         if z.tfi == i and not z.mitig and not f_pending(z) and z.q >= i_qShow
             if close <= z.top and close >= z.bot
                 inTxt := "IN " + (z.dir == 1 ? "DEMAND " : "SUPPLY ") + f_tags(z) + " Q" + str.tostring(math.round(z.q))
@@ -2419,6 +2432,7 @@ f_zoneStatus(int i) =>
                     dDn := d
                     qDn := z.q
     string txt = inTxt != "" ? inTxt : "supply " + (na(dUp) ? "none" : "↑" + str.tostring(dUp, "#.#") + " Q" + str.tostring(math.round(qUp))) + " · demand " + (na(dDn) ? "none" : "↓" + str.tostring(dDn, "#.#") + " Q" + str.tostring(math.round(qDn)))
+    txt := txt + (nHid > 0 ? "  (" + str.tostring(nHid) + " below Q" + str.tostring(i_qShow) + ")" : "")
     [txt, inTxt != "" ? inCol : color.silver]
 
 var table dash = table.new(f_dashPos(i_dashPos), 4, 9, bgcolor = color.new(color.black, 70), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
