@@ -1589,30 +1589,37 @@ i_maxZones = input.int(2,    "Zones per TF per side",            group = G_VIS, 
 i_showMit  = input.bool(true, "Show mitigated blocks",           group = G_VIS, inline = "mit", tooltip = "On: a zone that closes through its wick tip stays on the chart, faded and dotted, frozen where it broke, and a new zone on the other side that overlaps it is tagged as an S&R flip. Off: broken zones are deleted.")
 i_keepMit  = input.int(2,    "keep per TF",                     group = G_VIS, inline = "mit", minval = 1, maxval = 10)
 i_extBars  = input.int(20,   "Extend right (chart bars)",        group = G_VIS, minval = 0, maxval = 300)
+i_extMode  = input.string("Bars", "Extend zones", options = ["Bars", "Chart edge"], group = G_VIS, tooltip = "Bars: active zones end the set number of bars past the last candle. Chart edge: active zones and their quadrants run to the right edge of the chart. Mitigated zones always stop where they broke.")
 i_zoneTxt  = input.bool(true, "Zone labels",                     group = G_VIS)
 i_maxDist  = input.float(8.0, "Hide zones farther than (% from price)", group = G_VIS, minval = 0.0, step = 0.5, tooltip = "Zones farther than this from the current price are not drawn, so a distant monthly zone cannot squash the chart scale. They are still tracked and still count for setups and the dashboard. 0 = always draw.")
 i_cDem     = input.color(color.new(color.teal, 0), "Demand",     group = G_VIS, inline = "zc")
 i_cSup     = input.color(color.new(color.red,  0), "Supply",     group = G_VIS, inline = "zc")
 i_fillT    = input.int(85,   "Fill transparency (100 = no fill)", group = G_VIS, minval = 0, maxval = 100)
 
+i_qZoneCol = input.bool(true, "Quadrants use zone colour", group = G_QD, tooltip = "On: quadrant lines take the zone's demand/supply colour (50% brighter). Off: each level uses its own colour below.")
 i_quads = input.bool(true, "Show quadrant levels", group = G_QD, tooltip = "0% = body edge, 50% = Mean Threshold, 100% = wick tip (the rejection extreme and invalidation level). Each level has its own switch, style, width and price label.")
 i_q0    = input.bool(false,    "0%  ",   group = G_QD, inline = "q0")
+i_q0c = input.color(color.gray, "", group = G_QD, inline = "q0")
 i_q0s   = input.string("Solid", "",     options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q0")
 i_q0w   = input.int(1, "",              minval = 1, maxval = 4, group = G_QD, inline = "q0")
 i_q0l   = input.bool(false,    "label", group = G_QD, inline = "q0")
 i_q25   = input.bool(true,     "25% ",   group = G_QD, inline = "q25")
+i_q25c = input.color(color.gray, "", group = G_QD, inline = "q25")
 i_q25s  = input.string("Dotted", "",    options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q25")
 i_q25w  = input.int(1, "",              minval = 1, maxval = 4, group = G_QD, inline = "q25")
 i_q25l  = input.bool(false,    "label", group = G_QD, inline = "q25")
 i_q50   = input.bool(true,     "50% ",   group = G_QD, inline = "q50")
+i_q50c = input.color(color.orange, "", group = G_QD, inline = "q50")
 i_q50s  = input.string("Dashed", "",    options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q50")
 i_q50w  = input.int(2, "",              minval = 1, maxval = 4, group = G_QD, inline = "q50")
 i_q50l  = input.bool(true,     "label", group = G_QD, inline = "q50")
 i_q75   = input.bool(true,     "75% ",   group = G_QD, inline = "q75")
+i_q75c = input.color(color.gray, "", group = G_QD, inline = "q75")
 i_q75s  = input.string("Dotted", "",    options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q75")
 i_q75w  = input.int(1, "",              minval = 1, maxval = 4, group = G_QD, inline = "q75")
 i_q75l  = input.bool(false,    "label", group = G_QD, inline = "q75")
 i_q100  = input.bool(false,    "100%",   group = G_QD, inline = "q100")
+i_q100c = input.color(color.gray, "", group = G_QD, inline = "q100")
 i_q100s = input.string("Solid", "",     options = ["Solid", "Dashed", "Dotted"], group = G_QD, inline = "q100")
 i_q100w = input.int(1, "",              minval = 1, maxval = 4, group = G_QD, inline = "q100")
 i_q100l = input.bool(false,    "label", group = G_QD, inline = "q100")
@@ -1649,6 +1656,9 @@ i_alDyn  = input.bool(true, "Dynamic alert() messages", group = G_ALR, tooltip =
 i_dash     = input.bool(true, "Show dashboard", group = G_DSH)
 i_dashPos  = input.string("Bottom Right", "Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right", "Middle Left"], group = G_DSH)
 i_dashSize = input.string("Small", "Text size", options = ["Tiny", "Small", "Normal"], group = G_DSH)
+i_theme    = input.string("Auto", "Text theme", options = ["Auto", "Dark", "Light"], group = G_DSH, tooltip = "Auto reads the chart background and switches dashboard and quadrant-label text between light and dark so it stays readable.")
+i_recent   = input.bool(false, "Show recent HTF zones table", group = G_DSH, inline = "rec", tooltip = "A second small table listing the last 3 zones formed on M / W / 15D / D with their status, quality, volume validation and SFP flag.")
+i_recentPos = input.string("Top Left", "", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right", "Middle Left"], group = G_DSH, inline = "rec")
 
 // ============================================================================
 // HELPERS
@@ -1909,6 +1919,15 @@ var array<bool>   qOn  = array.from(i_q0,  i_q25,  i_q50,  i_q75,  i_q100)
 var array<string> qSty = array.from(i_q0s, i_q25s, i_q50s, i_q75s, i_q100s)
 var array<int>    qWid = array.from(i_q0w, i_q25w, i_q50w, i_q75w, i_q100w)
 var array<bool>   qLbl = array.from(i_q0l, i_q25l, i_q50l, i_q75l, i_q100l)
+var array<color>  qCol = array.from(i_q0c, i_q25c, i_q50c, i_q75c, i_q100c)
+
+// Light or dark chart background, from the chart colour or the override.
+f_isLight() =>
+    color bg = chart.bg_color
+    i_theme == "Light" ? true : i_theme == "Dark" ? false : 0.299 * color.r(bg) + 0.587 * color.g(bg) + 0.114 * color.b(bg) > 128
+
+f_textCol() =>
+    f_isLight() ? color.rgb(17, 24, 39) : color.white
 
 // Last closed close of the next TF down. When that TF is below the chart's,
 // the chart's own confirmed close stands in for it.
@@ -1945,6 +1964,7 @@ type Zone
     int   tapBar
     bool  wickThru
     bool  mitig
+    bool  gone       // removed from the chart (broken without keep, pruned or expired)
     int   mitT
     bool  s4         // setup already fired this visit, per structure TF
     bool  s5
@@ -1961,6 +1981,7 @@ var array<string> lastTxt   = array.new_string(8, "—")
 var array<line>   strLines  = array.new_line()
 var array<label>  strLbls   = array.new_label()
 var array<label>  setupLbls = array.new_label()
+var array<Zone>   recentZ   = array.new<Zone>()   // last 3 zone-TF zones, for the recent table
 
 // Setup proof: open trades and running tally.
 var array<int>   pfDir  = array.new_int()
@@ -2052,8 +2073,9 @@ f_undraw(Zone z) =>
 // Returns the zone itself: the trailing `z` keeps Pine from treating the
 // if/else below (box in one branch, loop in the other) as the return value.
 f_drawZone(Zone z) =>
-    color c  = z.dir == 1 ? i_cDem : i_cSup
-    int   rt = z.mitig ? z.mitT : time + i_extBars * chartMs
+    color c    = z.dir == 1 ? i_cDem : i_cSup
+    int   rt   = z.mitig ? z.mitT : time + i_extBars * chartMs
+    bool  edge = i_extMode == "Chart edge" and not z.mitig
     if z.mitig
         z.bx := box.new(z.t0, z.top, rt, z.bot, xloc = xloc.bar_time,
              bgcolor = color.new(c, math.max(i_fillT, 93)), border_color = color.new(c, 40), border_width = 1,
@@ -2067,15 +2089,16 @@ f_drawZone(Zone z) =>
              bgcolor = color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT),
              border_color = c, border_width = bw,
              border_style = pend or z.wickThru ? line.style_dashed : line.style_solid,
+             extend = edge ? extend.right : extend.none,
              text = i_zoneTxt ? f_zoneText(z) : "", text_size = size.small, text_color = c,
              text_halign = f_zoneHalign(z.tfi), text_valign = f_zoneValign(z.tfi))
         if i_quads
             for k = 0 to 4
                 if array.get(qOn, k)
                     float y = f_qPrice(z, array.get(qPct, k))
-                    array.push(z.qLines, line.new(z.t0, y, rt, y, xloc = xloc.bar_time, color = color.new(c, k == 2 ? 10 : 45), style = f_lineStyle(array.get(qSty, k)), width = array.get(qWid, k)))
+                    array.push(z.qLines, line.new(z.t0, y, rt, y, xloc = xloc.bar_time, extend = edge ? extend.right : extend.none, color = i_qZoneCol ? color.new(c, k == 2 ? 10 : 45) : array.get(qCol, k), style = f_lineStyle(array.get(qSty, k)), width = array.get(qWid, k)))
                     if array.get(qLbl, k)
-                        array.push(z.qLbls, label.new(rt, y, str.tostring(array.get(qPct, k) * 100, "#") + "%  " + str.tostring(y, format.mintick), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(c, 100), textcolor = c, size = size.tiny))
+                        array.push(z.qLbls, label.new(rt, y, str.tostring(array.get(qPct, k) * 100, "#") + "%  " + str.tostring(y, format.mintick), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(c, 100), textcolor = i_qZoneCol ? c : f_textCol(), size = size.tiny))
     z
 
 // Keep the best N active zones per timeframe and side: unconfirmed "S&D?"
@@ -2112,7 +2135,9 @@ f_prune(int i, int zd) =>
                     vicQ    := z.q
                     vicD    := d
         if victim >= 0
-            f_undraw(array.get(zones, victim))
+            Zone vz = array.get(zones, victim)
+            vz.gone := true
+            f_undraw(vz)
             array.remove(zones, victim)
         cnt -= 1
 
@@ -2132,7 +2157,9 @@ f_pruneMit(int i) =>
                     victim := j
                     oldest := z.mitT
         if victim >= 0
-            f_undraw(array.get(zones, victim))
+            Zone vz = array.get(zones, victim)
+            vz.gone := true
+            f_undraw(vz)
             array.remove(zones, victim)
         cnt -= 1
 
@@ -2147,7 +2174,7 @@ f_addZone(int i, int zd, float top, float bot, int tags, float ratio, float relV
         for m in zones
             if m.mitig and m.dir == -zd and m.bot <= top and m.top >= bot
                 flip := true
-        Zone z = Zone.new(tfi = i, dir = zd, top = top, bot = bot, liq = liq, sd = false, sr = sr or flip, fvg = false, sfp = sfp, relVol = relVol, tap50 = false, flip = flip and not sr, nest = -1, ratio = ratio, t0 = t0, born = time, ext = zd == 1 ? math.max(top, nz(extIn, top)) : math.min(bot, nz(extIn, bot)), visits = 0, armed = false, q = 0.0, inside = false, tapped = false, tapBar = na, wickThru = false, mitig = false, mitT = na, s4 = false, s5 = false, s6 = false, qLines = array.new<line>(), qLbls = array.new<label>())
+        Zone z = Zone.new(tfi = i, dir = zd, top = top, bot = bot, liq = liq, sd = false, sr = sr or flip, fvg = false, sfp = sfp, relVol = relVol, tap50 = false, flip = flip and not sr, nest = -1, ratio = ratio, t0 = t0, born = time, ext = zd == 1 ? math.max(top, nz(extIn, top)) : math.min(bot, nz(extIn, bot)), visits = 0, armed = false, q = 0.0, inside = false, tapped = false, tapBar = na, wickThru = false, mitig = false, gone = false, mitT = na, s4 = false, s5 = false, s6 = false, qLines = array.new<line>(), qLbls = array.new<label>())
         float za = array.get(atrs, i)
         float zmv = zd == 1 ? z.ext - top : bot - z.ext
         if not na(za) and za > 0 and zmv >= i_sdMult * za
@@ -2160,6 +2187,10 @@ f_addZone(int i, int zd, float top, float bot, int tags, float ratio, float relV
                     z.nest := m.tfi
         z.q := f_quality(z)
         array.push(zones, z)
+        if i <= 3
+            array.push(recentZ, z)
+            if array.size(recentZ) > 3
+                array.shift(recentZ)
         f_prune(i, zd)
         if not f_pending(z) and z.q >= i_qSetup
             array.set(fl, 0, true)
@@ -2231,6 +2262,7 @@ if array.size(zones) > 0
                     z.wickThru := z.dir == 1 ? low < z.bot : high > z.top
                     z.q        := f_quality(z)
         if remove
+            z.gone := true
             f_undraw(z)
             array.remove(zones, j)
         // Drawing is deferred to the last bar: history only needs the final
@@ -2458,7 +2490,7 @@ f_zoneStatus(int i) =>
     string txt = inTxt != "" ? inTxt : "supply " + (na(dUp) ? "none" : "↑" + str.tostring(dUp, "#.#") + " Q" + str.tostring(math.round(qUp))) + " · demand " + (na(dDn) ? "none" : "↓" + str.tostring(dDn, "#.#") + " Q" + str.tostring(math.round(qDn)))
     string why = (nHid > 0 ? str.tostring(nHid) + " below Q" + str.tostring(i_qShow) : "") + (nHid > 0 and nFar > 0 ? ", " : "") + (nFar > 0 ? str.tostring(nFar) + " beyond " + str.tostring(i_maxDist, "#.#") + "%" : "")
     txt := txt + (why != "" ? "  (hidden: " + why + ")" : "")
-    [txt, inTxt != "" ? inCol : color.silver]
+    [txt, inTxt != "" ? inCol : color.new(f_textCol(), 25)]
 
 var table dash = table.new(f_dashPos(i_dashPos), 4, 10, bgcolor = color.new(color.black, 70), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
 
@@ -2466,14 +2498,17 @@ if barstate.islast
     table.clear(dash, 0, 0, 3, 9)
     if enableRZ and i_dash
         dsz = i_dashSize == "Tiny" ? size.tiny : i_dashSize == "Normal" ? size.normal : size.small
-        color hdr = color.new(color.gray, 55)
-        table.cell(dash, 0, 0, "TF",         text_color = color.white, bgcolor = hdr, text_size = dsz)
-        table.cell(dash, 1, 0, "Bias",       text_color = color.white, bgcolor = hdr, text_size = dsz)
-        table.cell(dash, 2, 0, "Last break", text_color = color.white, bgcolor = hdr, text_size = dsz)
-        table.cell(dash, 3, 0, "Nearest zone (ATR away, quality)", text_color = color.white, bgcolor = hdr, text_size = dsz)
+        color hdr   = color.new(color.gray, 55)
+        color tc    = f_textCol()
+        color tcDim = color.new(tc, 25)
+        table.set_bgcolor(dash, f_isLight() ? color.new(color.white, 25) : color.new(color.black, 70))
+        table.cell(dash, 0, 0, "TF",         text_color = tc, bgcolor = hdr, text_size = dsz)
+        table.cell(dash, 1, 0, "Bias",       text_color = tc, bgcolor = hdr, text_size = dsz)
+        table.cell(dash, 2, 0, "Last break", text_color = tc, bgcolor = hdr, text_size = dsz)
+        table.cell(dash, 3, 0, "Nearest zone (ATR away, quality)", text_color = tc, bgcolor = hdr, text_size = dsz)
         for i = 0 to 7
             int r = i + 1
-            table.cell(dash, 0, r, array.get(names, i) + (i == 7 ? " (chart)" : ""), text_color = color.white, text_size = dsz, text_halign = text.align_left)
+            table.cell(dash, 0, r, array.get(names, i) + (i == 7 ? " (chart)" : ""), text_color = tc, text_size = dsz, text_halign = text.align_left)
             if not array.get(isOn, i)
                 string why = i == 7 and ctfDup ? "chart TF already listed" : not array.get(avail, i) ? "below chart TF" : "off"
                 table.cell(dash, 1, r, "—", text_color = color.gray, text_size = dsz)
@@ -2484,7 +2519,7 @@ if barstate.islast
                 table.cell(dash, 1, r, eb == 1 ? "BULL" : eb == -1 ? "BEAR" : "—", text_color = eb == 1 ? i_cBull : eb == -1 ? i_cBear : color.gray, text_size = dsz)
                 int    pd   = array.get(pendArr, i)
                 string last = array.get(lastTxt, i) + (pd == 1 ? " · wick ↑ pending" : pd == -1 ? " · wick ↓ pending" : "")
-                table.cell(dash, 2, r, last, text_color = color.silver, text_size = dsz, text_halign = text.align_left)
+                table.cell(dash, 2, r, last, text_color = tcDim, text_size = dsz, text_halign = text.align_left)
                 if i <= 3 or i == 7 or i_ltfZones
                     [zt, zc] = f_zoneStatus(i)
                     table.cell(dash, 3, r, zt, text_color = zc, text_size = dsz, text_halign = text.align_left)
@@ -2494,10 +2529,41 @@ if barstate.islast
             int    pfN   = pfWin + pfLoss
             string pfPct = pfN == 0 ? "—" : str.tostring(100.0 * pfWin / pfN, "#") + "%"
             color  pfCol = pfN == 0 ? color.gray : 100.0 * pfWin / pfN >= 100.0 / (1.0 + i_proofR) ? i_cBull : i_cBear
-            table.cell(dash, 0, 9, "Proof " + str.tostring(i_proofR, "#.#") + "R", text_color = color.white, text_size = dsz, text_halign = text.align_left)
+            table.cell(dash, 0, 9, "Proof " + str.tostring(i_proofR, "#.#") + "R", text_color = tc, text_size = dsz, text_halign = text.align_left)
             table.cell(dash, 1, 9, pfPct, text_color = pfCol, text_size = dsz)
-            table.cell(dash, 2, 9, str.tostring(pfWin) + "W / " + str.tostring(pfLoss) + "L", text_color = color.silver, text_size = dsz, text_halign = text.align_left)
-            table.cell(dash, 3, 9, "open " + str.tostring(array.size(pfDir)) + " · expired " + str.tostring(pfExp) + " · break-even " + str.tostring(100.0 / (1.0 + i_proofR), "#") + "%", text_color = color.silver, text_size = dsz, text_halign = text.align_left)
+            table.cell(dash, 2, 9, str.tostring(pfWin) + "W / " + str.tostring(pfLoss) + "L", text_color = tcDim, text_size = dsz, text_halign = text.align_left)
+            table.cell(dash, 3, 9, "open " + str.tostring(array.size(pfDir)) + " · expired " + str.tostring(pfExp) + " · break-even " + str.tostring(100.0 / (1.0 + i_proofR), "#") + "%", text_color = tcDim, text_size = dsz, text_halign = text.align_left)
+
+// Recent zone-TF zones (optional second table).
+var table recentTbl = table.new(f_dashPos(i_recentPos), 6, 4, bgcolor = color.new(color.black, 70), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+
+if barstate.islast
+    table.clear(recentTbl, 0, 0, 5, 3)
+    if enableRZ and i_recent
+        color tc  = f_textCol()
+        color hdr = color.new(color.gray, 55)
+        table.set_bgcolor(recentTbl, f_isLight() ? color.new(color.white, 25) : color.new(color.black, 70))
+        table.cell(recentTbl, 0, 0, "Recent", text_color = tc, bgcolor = hdr, text_size = size.small)
+        table.cell(recentTbl, 1, 0, "Side",   text_color = tc, bgcolor = hdr, text_size = size.small)
+        table.cell(recentTbl, 2, 0, "Status", text_color = tc, bgcolor = hdr, text_size = size.small)
+        table.cell(recentTbl, 3, 0, "Q",      text_color = tc, bgcolor = hdr, text_size = size.small)
+        table.cell(recentTbl, 4, 0, "Volume", text_color = tc, bgcolor = hdr, text_size = size.small)
+        table.cell(recentTbl, 5, 0, "SFP",    text_color = tc, bgcolor = hdr, text_size = size.small)
+        int nR = array.size(recentZ)
+        if nR == 0
+            table.cell(recentTbl, 0, 1, "no zones yet", text_color = color.gray, text_size = size.small)
+        else
+            for r = 0 to nR - 1
+                Zone   rz  = array.get(recentZ, nR - 1 - r)
+                string st  = rz.gone ? "Removed" : rz.mitig ? "Mitigated" : rz.tapped ? "Tapped" : "Active"
+                color  stc = rz.gone or rz.mitig ? color.gray : rz.tapped ? color.orange : tc
+                string vol = na(rz.relVol) ? "n/a" : (rz.relVol >= i_volPct ? "✓ " : "✗ ") + str.tostring(rz.relVol, "#") + "%"
+                table.cell(recentTbl, 0, r + 1, array.get(names, rz.tfi), text_color = tc, text_size = size.small)
+                table.cell(recentTbl, 1, r + 1, rz.dir == 1 ? "Demand" : "Supply", text_color = rz.dir == 1 ? i_cDem : i_cSup, text_size = size.small)
+                table.cell(recentTbl, 2, r + 1, st, text_color = stc, text_size = size.small)
+                table.cell(recentTbl, 3, r + 1, str.tostring(math.round(rz.q)), text_color = tc, text_size = size.small)
+                table.cell(recentTbl, 4, r + 1, vol, text_color = na(rz.relVol) or rz.relVol < i_volPct ? color.gray : i_cDem, text_size = size.small)
+                table.cell(recentTbl, 5, r + 1, rz.sfp ? "yes" : "—", text_color = tc, text_size = size.small)
 
 // ============================================================================
 // ALERTS  (all gated by the optional session filter)
