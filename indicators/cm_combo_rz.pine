@@ -1613,6 +1613,7 @@ i_ltfLen     = input.int(3,     "Structure TF swing length",     group = G_STR, 
 i_showHtfStr = input.bool(true, "Draw zone-TF breaks",           group = G_STR)
 i_showLtfStr = input.bool(true, "Draw structure-TF breaks",      group = G_STR)
 i_strKeep    = input.int(30,    "Break lines to keep",           group = G_STR, minval = 4, maxval = 150)
+i_histBars   = input.int(3000,  "Draw breaks & setups for last N bars", group = G_STR, minval = 100, maxval = 20000, tooltip = "Break lines and setup labels are only drawn for the most recent N chart bars. The logic, dashboard and setup proof still use the whole history; this just stops the script creating and deleting thousands of drawings on long charts.")
 i_cBull      = input.color(color.aqua,   "Bull break",           group = G_STR, inline = "sc")
 i_cBear      = input.color(color.orange, "Bear break",           group = G_STR, inline = "sc")
 
@@ -1620,6 +1621,11 @@ i_showSetup = input.bool(true,  "Show setup labels",             group = G_SIG)
 i_setupBos  = input.bool(true,  "Count BOS as well as CHoCH",    group = G_SIG, tooltip = "OFF: only a CHoCH inside a zone counts as a setup. Either way each zone gives at most one setup per structure TF per visit.")
 i_setupCE   = input.bool(false, "Require Chandelier agreement",  group = G_SIG, tooltip = "ON: a setup only fires when M5 Chandelier Exit is enabled and its trend already points the setup's way.")
 i_setupWin  = input.int(30,     "Zone tap window (chart bars)",  group = G_SIG, minval = 1, maxval = 500, tooltip = "The break must come within this many chart bars of price last trading into the zone.")
+
+const string G_PRF = "RZ ▸ Setup proof"
+i_proof     = input.bool(true, "Track setup proof",             group = G_PRF, tooltip = "Measures every setup on this chart: entry at the setup bar's close, stop at the zone's wick tip (0%), target at R × that risk. A setup wins if the target trades before the stop (stop checked first on a bar that hits both), and expires if neither happens in time. Results show in the dashboard.")
+i_proofR    = input.float(2.0, "Target (R multiple)",           group = G_PRF, minval = 0.5, step = 0.5)
+i_proofBars = input.int(300,   "Expire after (chart bars)",     group = G_PRF, minval = 10, maxval = 5000)
 
 i_alSess = input.bool(false, "Only alert during sessions",       group = G_ALR, tooltip = "Zone alerts only fire while one of the ticked sessions below is open. Uses the session hours and timezone from the Market Sessions group (they do not need to be drawn). Ignored on daily and higher charts.")
 i_alA    = input.bool(true,  "Asia",     group = G_ALR, inline = "as")
@@ -1664,11 +1670,17 @@ f_countIn(array<float> a, float lo, float hi) =>
 // ============================================================================
 // HTF ENGINE — evaluated inside request.security on each timeframe
 // ----------------------------------------------------------------------------
-// Returned with [1] and read with lookahead_on = last CLOSED bar of that TF.
+// Returned with [off] and read with lookahead_on. off = 1 for a TF above the
+// chart's (= its last CLOSED bar: no repaint, no lag beyond the close);
+// off = 0 when the TF equals the chart's, so chart-TF values arrive on their
+// own bar instead of one bar late (the chart side only acts on them once the
+// bar is confirmed).
 // Zone tags come back as an int: 1 = LIQ, 4 = S&R, 5 = both.
 // ============================================================================
-f_tf(simple int pivLen, simple float wickRatio, simple float srTol) =>
-    float atrV = ta.atr(14)
+f_tf(simple int pivLen, simple float wickRatio, simple float srTol, simple int off) =>
+    // ATR(14) needs 14 bars; a monthly series on a short chart may not have
+    // them, so fall back to the average true range so far.
+    float atrV = nz(ta.atr(14), ta.cum(ta.tr(true)) / (bar_index + 1))
     float rzPh = ta.pivothigh(high, pivLen, pivLen)
     float rzPl = ta.pivotlow(low,   pivLen, pivLen)
     int   pivT = time[pivLen]
@@ -1709,17 +1721,30 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol) =>
     float upW    = high - bodyHi
     float dnW    = bodyLo - low
 
-    var float liqH = na
-    var float liqL = na
-    var array<float> pHs = array.new_float()
-    var array<float> pLs = array.new_float()
+    // Every unswept swing is a liquidity level (up to 10 per side), not just
+    // the latest one. Any trade through a level consumes it, so each level
+    // can produce at most one sweep.
+    var array<float> liqHs = array.new_float()
+    var array<float> liqLs = array.new_float()
+    var array<float> pHs   = array.new_float()
+    var array<float> pLs   = array.new_float()
 
-    bool bearLiq = not na(liqH) and high > liqH and bodyHi < liqH
-    bool bullLiq = not na(liqL) and low < liqL and bodyLo > liqL
-    if not na(liqH) and high > liqH
-        liqH := na
-    if not na(liqL) and low < liqL
-        liqL := na
+    bool bearLiq = false
+    bool bullLiq = false
+    if array.size(liqHs) > 0
+        for k = array.size(liqHs) - 1 to 0
+            float lv = array.get(liqHs, k)
+            if high > lv
+                if bodyHi < lv
+                    bearLiq := true
+                array.remove(liqHs, k)
+    if array.size(liqLs) > 0
+        for k = array.size(liqLs) - 1 to 0
+            float lv = array.get(liqLs, k)
+            if low < lv
+                if bodyLo > lv
+                    bullLiq := true
+                array.remove(liqLs, k)
 
     bool bearWick = upW > 0 and upW >= wickRatio * body and upW >= dnW
     bool bullWick = dnW > 0 and dnW >= wickRatio * body and dnW >= upW
@@ -1771,34 +1796,47 @@ f_tf(simple int pivLen, simple float wickRatio, simple float srTol) =>
     if not na(rzPh)
         swH  := rzPh
         swHT := pivT
-        liqH := rzPh
+        array.push(liqHs, rzPh)
+        if array.size(liqHs) > 10
+            array.shift(liqHs)
         array.push(pHs, rzPh)
         if array.size(pHs) > 10
             array.shift(pHs)
     if not na(rzPl)
         swL  := rzPl
         swLT := pivT
-        liqL := rzPl
+        array.push(liqLs, rzPl)
+        if array.size(liqLs) > 10
+            array.shift(liqLs)
         array.push(pLs, rzPl)
         if array.size(pLs) > 10
             array.shift(pLs)
 
-    [close[1], atrV[1], swH[1], swL[1], swHT[1], swLT[1], evT[1], evDir[1], evChoch[1], evLvl[1], evPivT[1], zBullT[1], zBullTop[1], zBullBot[1], zBullTags[1], zBullRat[1], zBearT[1], zBearTop[1], zBearBot[1], zBearTags[1], zBearRat[1], fvgUpT[1], fvgUpT2[1], fvgDnT[1], fvgDnT2[1]]
+    [close[off], atrV[off], swH[off], swL[off], swHT[off], swLT[off], evT[off], evDir[off], evChoch[off], evLvl[off], evPivT[off], zBullT[off], zBullTop[off], zBullBot[off], zBullTags[off], zBullRat[off], zBearT[off], zBearTop[off], zBearBot[off], zBearTags[off], zBearRat[off], fvgUpT[off], fvgUpT2[off], fvgDnT[off], fvgDnT2[off]]
 
-[c0, a0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, rT0, rTop0, rBot0, rTag0, rRat0, fu0, fuu0, fd0, fdd0] = request.security(syminfo.tickerid, f_req(i_tf0), f_tf(i_htfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
-[c1, a1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, rT1, rTop1, rBot1, rTag1, rRat1, fu1, fuu1, fd1, fdd1] = request.security(syminfo.tickerid, f_req(i_tf1), f_tf(i_htfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
-[c2, a2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, rT2, rTop2, rBot2, rTag2, rRat2, fu2, fuu2, fd2, fdd2] = request.security(syminfo.tickerid, f_req(i_tf2), f_tf(i_htfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
-[c3, a3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, rT3, rTop3, rBot3, rTag3, rRat3, fu3, fuu3, fd3, fdd3] = request.security(syminfo.tickerid, f_req(i_tf3), f_tf(i_htfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
-[c4, a4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, rT4, rTop4, rBot4, rTag4, rRat4, fu4, fuu4, fd4, fdd4] = request.security(syminfo.tickerid, f_req(i_tf4), f_tf(i_ltfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
-[c5, a5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, rT5, rTop5, rBot5, rTag5, rRat5, fu5, fuu5, fd5, fdd5] = request.security(syminfo.tickerid, f_req(i_tf5), f_tf(i_ltfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
-[c6, a6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, rT6, rTop6, rBot6, rTag6, rRat6, fu6, fuu6, fd6, fdd6] = request.security(syminfo.tickerid, f_req(i_tf6), f_tf(i_ltfLen, i_wick, i_srTol), lookahead = barmerge.lookahead_on)
+f_off(simple string tf) =>
+    timeframe.in_seconds(tf) == chartSec ? 0 : 1
+
+[c0, a0, sh0, sl0, sht0, slt0, eT0, eD0, eC0, eL0, eP0, bT0, bTop0, bBot0, bTag0, bRat0, rT0, rTop0, rBot0, rTag0, rRat0, fu0, fuu0, fd0, fdd0] = request.security(syminfo.tickerid, f_req(i_tf0), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf0)), lookahead = barmerge.lookahead_on)
+[c1, a1, sh1, sl1, sht1, slt1, eT1, eD1, eC1, eL1, eP1, bT1, bTop1, bBot1, bTag1, bRat1, rT1, rTop1, rBot1, rTag1, rRat1, fu1, fuu1, fd1, fdd1] = request.security(syminfo.tickerid, f_req(i_tf1), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf1)), lookahead = barmerge.lookahead_on)
+[c2, a2, sh2, sl2, sht2, slt2, eT2, eD2, eC2, eL2, eP2, bT2, bTop2, bBot2, bTag2, bRat2, rT2, rTop2, rBot2, rTag2, rRat2, fu2, fuu2, fd2, fdd2] = request.security(syminfo.tickerid, f_req(i_tf2), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf2)), lookahead = barmerge.lookahead_on)
+[c3, a3, sh3, sl3, sht3, slt3, eT3, eD3, eC3, eL3, eP3, bT3, bTop3, bBot3, bTag3, bRat3, rT3, rTop3, rBot3, rTag3, rRat3, fu3, fuu3, fd3, fdd3] = request.security(syminfo.tickerid, f_req(i_tf3), f_tf(i_htfLen, i_wick, i_srTol, f_off(i_tf3)), lookahead = barmerge.lookahead_on)
+[c4, a4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag4, bRat4, rT4, rTop4, rBot4, rTag4, rRat4, fu4, fuu4, fd4, fdd4] = request.security(syminfo.tickerid, f_req(i_tf4), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf4)), lookahead = barmerge.lookahead_on)
+[c5, a5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, rT5, rTop5, rBot5, rTag5, rRat5, fu5, fuu5, fd5, fdd5] = request.security(syminfo.tickerid, f_req(i_tf5), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf5)), lookahead = barmerge.lookahead_on)
+[c6, a6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, rT6, rTop6, rBot6, rTag6, rRat6, fu6, fuu6, fd6, fdd6] = request.security(syminfo.tickerid, f_req(i_tf6), f_tf(i_ltfLen, i_wick, i_srTol, f_off(i_tf6)), lookahead = barmerge.lookahead_on)
 
 // ============================================================================
 // PER-TIMEFRAME LOOKUPS  (index 0-3 = zone TFs, 4-6 = structure TFs)
 // ============================================================================
-closes = array.from(c0, c1, c2, c3, c4, c5, c6)
+// A chart-TF value is live until the bar closes; hide it until then so a
+// zone cannot be killed by an intrabar close that later reverses.
+f_cl(float c, simple string tf) =>
+    timeframe.in_seconds(tf) == chartSec and not barstate.isconfirmed ? float(na) : c
+
+closes = array.from(f_cl(c0, i_tf0), f_cl(c1, i_tf1), f_cl(c2, i_tf2), f_cl(c3, i_tf3), f_cl(c4, i_tf4), f_cl(c5, i_tf5), f_cl(c6, i_tf6))
+var array<bool> sameTf = array.from(f_off(i_tf0) == 0, f_off(i_tf1) == 0, f_off(i_tf2) == 0, f_off(i_tf3) == 0, f_off(i_tf4) == 0, f_off(i_tf5) == 0, f_off(i_tf6) == 0)
 atrs   = array.from(a0, a1, a2, a3, a4, a5, a6)
-avail  = array.from(f_avail(i_tf0), f_avail(i_tf1), f_avail(i_tf2), f_avail(i_tf3), f_avail(i_tf4), f_avail(i_tf5), f_avail(i_tf6))
+var array<bool> avail = array.from(f_avail(i_tf0), f_avail(i_tf1), f_avail(i_tf2), f_avail(i_tf3), f_avail(i_tf4), f_avail(i_tf5), f_avail(i_tf6))
 isOn   = array.from(enableRZ and i_on0 and f_avail(i_tf0), enableRZ and i_on1 and f_avail(i_tf1), enableRZ and i_on2 and f_avail(i_tf2), enableRZ and i_on3 and f_avail(i_tf3), enableRZ and i_on4 and f_avail(i_tf4), enableRZ and i_on5 and f_avail(i_tf5), enableRZ and i_on6 and f_avail(i_tf6))
 
 var array<string> names   = array.from(f_tfName(i_tf0), f_tfName(i_tf1), f_tfName(i_tf2), f_tfName(i_tf3), f_tfName(i_tf4), f_tfName(i_tf5), f_tfName(i_tf6))
@@ -1834,6 +1872,7 @@ type Zone
     int   born       // chart time the zone was created
     float ext        // furthest price reached away from the zone
     int   visits
+    bool  armed      // price has left the zone at least once since it formed
     float q          // quality score 0-100
     bool  inside
     bool  tapped
@@ -1856,6 +1895,15 @@ var array<string> lastTxt   = array.new_string(7, "—")
 var array<line>   strLines  = array.new_line()
 var array<label>  strLbls   = array.new_label()
 var array<label>  setupLbls = array.new_label()
+
+// Setup proof: open trades and running tally.
+var array<int>   pfDir  = array.new_int()
+var array<float> pfStop = array.new_float()
+var array<float> pfTgt  = array.new_float()
+var array<int>   pfBar  = array.new_int()
+var int pfWin = 0
+var int pfLoss = 0
+var int pfExp = 0
 
 // Reset every bar.
 pendArr = array.new_int(7, 0)        // +1 / -1 = wick through a zone-TF swing, awaiting a close
@@ -1947,7 +1995,9 @@ f_drawZone(Zone z) =>
     z
 
 // Keep the best N active zones per timeframe and side: unconfirmed "S&D?"
-// zones go first, then the lowest score, then the farthest from price.
+// zones go first, then zones scoring below "Min quality to draw", then the
+// farthest from price. (Score is not compared directly: a brand-new zone has
+// had no time to displace yet and would always lose to an older one.)
 f_prune(int i, int zd) =>
     int cnt = 0
     for z in zones
@@ -1968,8 +2018,8 @@ f_prune(int i, int zd) =>
                     take := true
                 else if pend != vicPend
                     take := pend
-                else if z.q != vicQ
-                    take := z.q < vicQ
+                else if (z.q < i_qShow) != (vicQ < i_qShow)
+                    take := z.q < i_qShow
                 else
                     take := d > vicD
                 if take
@@ -2012,7 +2062,7 @@ f_addZone(int i, int zd, float top, float bot, int tags, float ratio, int t0) =>
         for m in zones
             if m.mitig and m.dir == -zd and m.bot <= top and m.top >= bot
                 flip := true
-        Zone z = Zone.new(tfi = i, dir = zd, top = top, bot = bot, liq = liq, sd = false, sr = sr or flip, fvg = false, flip = flip and not sr, ratio = ratio, t0 = t0, born = time, ext = zd == 1 ? top : bot, visits = 0, q = 0.0, inside = false, tapped = false, tapBar = na, wickThru = false, mitig = false, mitT = na, s4 = false, s5 = false, s6 = false, qLines = array.new<line>(), qLbls = array.new<label>())
+        Zone z = Zone.new(tfi = i, dir = zd, top = top, bot = bot, liq = liq, sd = false, sr = sr or flip, fvg = false, flip = flip and not sr, ratio = ratio, t0 = t0, born = time, ext = zd == 1 ? top : bot, visits = 0, armed = false, q = 0.0, inside = false, tapped = false, tapBar = na, wickThru = false, mitig = false, mitT = na, s4 = false, s5 = false, s6 = false, qLines = array.new<line>(), qLbls = array.new<label>())
         z.q := f_quality(z)
         array.push(zones, z)
         f_prune(i, zd)
@@ -2052,7 +2102,12 @@ if array.size(zones) > 0
                 if f_pending(z) and time - z.born > i_sdBars * array.get(tfMsArr, z.tfi)
                     remove := true
                 else
-                    bool touch = z.dir == 1 ? low <= z.top : high >= z.bot
+                    // Taps only count once price has left the zone: the bars
+                    // right after the rejection candle often still trade in
+                    // its wick and are not a return to the zone.
+                    if not z.armed
+                        z.armed := z.dir == 1 ? low > z.top : high < z.bot
+                    bool touch = z.armed and (z.dir == 1 ? low <= z.top : high >= z.bot)
                     if touch and not z.inside
                         // A fresh visit re-arms the one-setup-per-TF rule.
                         z.visits := z.visits + 1
@@ -2070,8 +2125,11 @@ if array.size(zones) > 0
         if remove
             f_undraw(z)
             array.remove(zones, j)
-        else
-            bool want = not f_far(z) and (z.mitig or z.q >= i_qShow)
+        // Drawing is deferred to the last bar: history only needs the final
+        // state, so boxes are not created, restyled and deleted on every
+        // historical bar. A mitigated zone keeps the score it had when it broke.
+        else if barstate.islast
+            bool want = not f_far(z) and z.q >= i_qShow
             if want and na(z.bx)
                 f_drawZone(z)
             else if not want and not na(z.bx)
@@ -2115,7 +2173,8 @@ f_event(int i, int zd, bool choch, float lvl, int pivT, int evTime, bool early) 
     if early
         array.set(fl, 4, true)
 
-    bool draw = i <= 3 ? i_showHtfStr : i_showLtfStr
+    bool recent = bar_index >= last_bar_index - i_histBars
+    bool draw   = recent and (i <= 3 ? i_showHtfStr : i_showLtfStr)
     if draw and not na(lvl) and not na(evTime)
         color c  = zd == 1 ? i_cBull : i_cBear
         int   x1 = na(pivT) ? evTime : pivT
@@ -2142,7 +2201,15 @@ f_event(int i, int zd, bool choch, float lvl, int pivT, int evTime, bool early) 
         if not na(best)
             f_setFired(best, i)
             array.set(fl, zd == 1 ? 2 : 3, true)
-            if i_showSetup
+            if i_proof
+                float stp = f_qPrice(best, 0.0)
+                float rsk = math.abs(close - stp)
+                if rsk > 0 and (zd == 1 ? close > stp : close < stp)
+                    array.push(pfDir,  zd)
+                    array.push(pfStop, stp)
+                    array.push(pfTgt,  close + zd * rsk * i_proofR)
+                    array.push(pfBar,  bar_index)
+            if i_showSetup and recent
                 string txt = (zd == 1 ? "▲ " : "▼ ") + array.get(names, i) + " " + kind + " Q" + str.tostring(math.round(best.q))
                 string tip = array.get(names, i) + " " + kind + " " + arrow + " in " + array.get(names, best.tfi) + (zd == 1 ? " demand (" : " supply (") + f_tags(best) + ")\nQuality " + str.tostring(math.round(best.q)) + "\nZone " + str.tostring(best.bot, format.mintick) + " – " + str.tostring(best.top, format.mintick) + "\n50% " + str.tostring(f_qPrice(best, 0.5), format.mintick)
                 label s = label.new(bar_index, zd == 1 ? low : high, txt, style = zd == 1 ? label.style_label_up : label.style_label_down, color = zd == 1 ? i_cDem : i_cSup, textcolor = color.white, size = size.tiny, tooltip = tip)
@@ -2158,7 +2225,8 @@ f_proc(int i, float swHi, float swLo, int sht, int slt, int eT, int eD, bool eC,
     bool newBear = not na(rT) and (na(rT[1]) or rT != rT[1])
     bool newFu   = not na(fu) and (na(fu[1]) or fu != fu[1])
     bool newFd   = not na(fd) and (na(fd[1]) or fd != fd[1])
-    if array.get(isOn, i)
+    bool live    = array.get(sameTf, i) and not barstate.isconfirmed
+    if array.get(isOn, i) and not live
         if i <= 3
             if newBull
                 f_addZone(i, 1, bTop, bBot, bTag, bRat, bT)
@@ -2208,6 +2276,31 @@ f_proc(4, sh4, sl4, sht4, slt4, eT4, eD4, eC4, eL4, eP4, bT4, bTop4, bBot4, bTag
 f_proc(5, sh5, sl5, sht5, slt5, eT5, eD5, eC5, eL5, eP5, bT5, bTop5, bBot5, bTag5, bRat5, rT5, rTop5, rBot5, rTag5, rRat5, fu5, fuu5, fd5, fdd5)
 f_proc(6, sh6, sl6, sht6, slt6, eT6, eD6, eC6, eL6, eP6, bT6, bTop6, bBot6, bTag6, bRat6, rT6, rTop6, rBot6, rTag6, rRat6, fu6, fuu6, fd6, fdd6)
 
+// Resolve open setup-proof trades on confirmed bars (from the bar after entry).
+if barstate.isconfirmed and array.size(pfDir) > 0
+    for k = array.size(pfDir) - 1 to 0
+        int   pd  = array.get(pfDir, k)
+        float stp = array.get(pfStop, k)
+        float tgt = array.get(pfTgt, k)
+        int   b0  = array.get(pfBar, k)
+        if bar_index > b0
+            bool hitStop = pd == 1 ? low <= stp : high >= stp
+            bool hitTgt  = pd == 1 ? high >= tgt : low <= tgt
+            bool done    = true
+            if hitStop
+                pfLoss += 1
+            else if hitTgt
+                pfWin += 1
+            else if bar_index - b0 >= i_proofBars
+                pfExp += 1
+            else
+                done := false
+            if done
+                array.remove(pfDir, k)
+                array.remove(pfStop, k)
+                array.remove(pfTgt, k)
+                array.remove(pfBar, k)
+
 // ============================================================================
 // DASHBOARD
 // ============================================================================
@@ -2248,10 +2341,10 @@ f_zoneStatus(int i) =>
     string txt = inTxt != "" ? inTxt : "supply " + (na(dUp) ? "none" : "↑" + str.tostring(dUp, "#.#") + " Q" + str.tostring(math.round(qUp))) + " · demand " + (na(dDn) ? "none" : "↓" + str.tostring(dDn, "#.#") + " Q" + str.tostring(math.round(qDn)))
     [txt, inTxt != "" ? inCol : color.silver]
 
-var table dash = table.new(f_dashPos(i_dashPos), 4, 8, bgcolor = color.new(color.black, 70), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+var table dash = table.new(f_dashPos(i_dashPos), 4, 9, bgcolor = color.new(color.black, 70), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
 
 if barstate.islast
-    table.clear(dash, 0, 0, 3, 7)
+    table.clear(dash, 0, 0, 3, 8)
     if enableRZ and i_dash
         dsz = i_dashSize == "Tiny" ? size.tiny : i_dashSize == "Normal" ? size.normal : size.small
         color hdr = color.new(color.gray, 55)
@@ -2278,6 +2371,14 @@ if barstate.islast
                     table.cell(dash, 3, r, zt, text_color = zc, text_size = dsz, text_halign = text.align_left)
                 else
                     table.cell(dash, 3, r, "", text_size = dsz)
+        if i_proof
+            int    pfN   = pfWin + pfLoss
+            string pfPct = pfN == 0 ? "—" : str.tostring(100.0 * pfWin / pfN, "#") + "%"
+            color  pfCol = pfN == 0 ? color.gray : 100.0 * pfWin / pfN >= 100.0 / (1.0 + i_proofR) ? i_cBull : i_cBear
+            table.cell(dash, 0, 8, "Proof " + str.tostring(i_proofR, "#.#") + "R", text_color = color.white, text_size = dsz, text_halign = text.align_left)
+            table.cell(dash, 1, 8, pfPct, text_color = pfCol, text_size = dsz)
+            table.cell(dash, 2, 8, str.tostring(pfWin) + "W / " + str.tostring(pfLoss) + "L", text_color = color.silver, text_size = dsz, text_halign = text.align_left)
+            table.cell(dash, 3, 8, "open " + str.tostring(array.size(pfDir)) + " · expired " + str.tostring(pfExp) + " · break-even " + str.tostring(100.0 / (1.0 + i_proofR), "#") + "%", text_color = color.silver, text_size = dsz, text_halign = text.align_left)
 
 // ============================================================================
 // ALERTS  (all gated by the optional session filter)
