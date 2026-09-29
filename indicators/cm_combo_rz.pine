@@ -1588,7 +1588,7 @@ i_showMit  = input.bool(true, "Show mitigated blocks",           group = G_VIS, 
 i_keepMit  = input.int(2,    "keep per TF",                     group = G_VIS, inline = "mit", minval = 1, maxval = 10)
 i_extBars  = input.int(20,   "Extend right (chart bars)",        group = G_VIS, minval = 0, maxval = 300)
 i_zoneTxt  = input.bool(true, "Zone labels",                     group = G_VIS)
-i_maxDist  = input.float(3.0, "Hide zones farther than (% from price)", group = G_VIS, minval = 0.0, step = 0.5, tooltip = "Zones farther than this from the current price are not drawn, so a distant monthly zone cannot squash the chart scale. They are still tracked and still count for setups and the dashboard. 0 = always draw.")
+i_maxDist  = input.float(8.0, "Hide zones farther than (% from price)", group = G_VIS, minval = 0.0, step = 0.5, tooltip = "Zones farther than this from the current price are not drawn, so a distant monthly zone cannot squash the chart scale. They are still tracked and still count for setups and the dashboard. 0 = always draw.")
 i_cDem     = input.color(color.new(color.teal, 0), "Demand",     group = G_VIS, inline = "zc")
 i_cSup     = input.color(color.new(color.red,  0), "Supply",     group = G_VIS, inline = "zc")
 i_fillT    = input.int(85,   "Fill transparency (100 = no fill)", group = G_VIS, minval = 0, maxval = 100)
@@ -2044,9 +2044,9 @@ f_drawZone(Zone z) =>
     int   rt = z.mitig ? z.mitT : time + i_extBars * chartMs
     if z.mitig
         z.bx := box.new(z.t0, z.top, rt, z.bot, xloc = xloc.bar_time,
-             bgcolor = color.new(c, math.max(i_fillT, 95)), border_color = color.new(c, 65), border_width = 1,
+             bgcolor = color.new(c, math.max(i_fillT, 93)), border_color = color.new(c, 40), border_width = 1,
              border_style = line.style_dotted,
-             text = i_zoneTxt ? f_zoneText(z) : "", text_size = size.tiny, text_color = color.new(c, 45),
+             text = i_zoneTxt ? f_zoneText(z) : "", text_size = size.tiny, text_color = color.new(c, 25),
              text_halign = f_zoneHalign(z.tfi), text_valign = f_zoneValign(z.tfi))
     else
         bool pend = f_pending(z)
@@ -2414,9 +2414,12 @@ f_zoneStatus(int i) =>
     float  qDn   = na
     float  a     = array.get(atrs, i)
     int    nHid  = 0
+    int    nFar  = 0
     for z in zones
         if z.tfi == i and not z.mitig and (f_pending(z) or z.q < i_qShow)
             nHid += 1
+        else if z.tfi == i and not z.mitig and f_far(z)
+            nFar += 1
         if z.tfi == i and not z.mitig and not f_pending(z) and z.q >= i_qShow
             if close <= z.top and close >= z.bot
                 inTxt := "IN " + (z.dir == 1 ? "DEMAND " : "SUPPLY ") + f_tags(z) + " Q" + str.tostring(math.round(z.q))
@@ -2432,7 +2435,8 @@ f_zoneStatus(int i) =>
                     dDn := d
                     qDn := z.q
     string txt = inTxt != "" ? inTxt : "supply " + (na(dUp) ? "none" : "↑" + str.tostring(dUp, "#.#") + " Q" + str.tostring(math.round(qUp))) + " · demand " + (na(dDn) ? "none" : "↓" + str.tostring(dDn, "#.#") + " Q" + str.tostring(math.round(qDn)))
-    txt := txt + (nHid > 0 ? "  (" + str.tostring(nHid) + " below Q" + str.tostring(i_qShow) + ")" : "")
+    string why = (nHid > 0 ? str.tostring(nHid) + " below Q" + str.tostring(i_qShow) : "") + (nHid > 0 and nFar > 0 ? ", " : "") + (nFar > 0 ? str.tostring(nFar) + " beyond " + str.tostring(i_maxDist, "#.#") + "%" : "")
+    txt := txt + (why != "" ? "  (hidden: " + why + ")" : "")
     [txt, inTxt != "" ? inCol : color.silver]
 
 var table dash = table.new(f_dashPos(i_dashPos), 4, 9, bgcolor = color.new(color.black, 70), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
