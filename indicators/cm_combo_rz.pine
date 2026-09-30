@@ -2032,6 +2032,19 @@ f_tags(Zone z) =>
         s := s + "+VOL"
     s == "" ? "S&D?" : s
 
+// Price band for drawing (chart-TF ATR based) so tall zones cannot stretch
+// the chart's autoscale.
+rzChartAtr = ta.atr(14)
+
+f_visTop(Zone z) =>
+    i_band > 0 and not na(rzChartAtr) ? math.min(z.top, close + i_band * rzChartAtr) : z.top
+
+f_visBot(Zone z) =>
+    i_band > 0 and not na(rzChartAtr) ? math.max(z.bot, close - i_band * rzChartAtr) : z.bot
+
+f_clipped(Zone z) =>
+    f_visTop(z) < z.top or f_visBot(z) > z.bot
+
 f_zoneText(Zone z) =>
     string side = z.dir == 1 ? " demand · " : " supply · "
     string clip = f_clipped(z) ? " (clipped)" : ""
@@ -2046,19 +2059,6 @@ f_quality(Zone z) =>
     float dispPts = na(a) or a <= 0 ? 0.0 : 15.0 * math.min(math.max(mv, 0.0) / a / (2.0 * i_sdMult), 1.0)
     float frshPts = math.max(0.0, 10.0 - 4.0 * z.visits - (z.wickThru ? 5.0 : 0.0))
     math.min(100.0, tagPts + wickPts + dispPts + frshPts)
-
-// Price band for drawing (chart-TF ATR based) so tall zones cannot stretch
-// the chart's autoscale.
-rzChartAtr = ta.atr(14)
-
-f_visTop(Zone z) =>
-    i_band > 0 and not na(rzChartAtr) ? math.min(z.top, close + i_band * rzChartAtr) : z.top
-
-f_visBot(Zone z) =>
-    i_band > 0 and not na(rzChartAtr) ? math.max(z.bot, close - i_band * rzChartAtr) : z.bot
-
-f_clipped(Zone z) =>
-    f_visTop(z) < z.top or f_visBot(z) > z.bot
 
 f_far(Zone z) =>
     float d = close > z.top ? close - z.top : close < z.bot ? z.bot - close : 0.0
