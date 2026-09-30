@@ -1546,7 +1546,7 @@ alertcondition(enableAtrSltp and sltpTp3Crossed, title="Price crossed TP3", mess
 // INPUTS
 // ============================================================================
 // Shown in the dashboard's top-left cell so the running version is obvious.
-const string RZ_VERSION = "v10"
+const string RZ_VERSION = "v11"
 const string G_TF  = "RZ ▸ Timeframes"
 const string G_DET = "RZ ▸ Zone detection"
 const string G_QLT = "RZ ▸ Zone quality"
@@ -1594,6 +1594,7 @@ i_extBars  = input.int(20,   "Extend right (chart bars)",        group = G_VIS, 
 i_extMode  = input.string("Bars", "Extend zones", options = ["Bars", "Chart edge"], group = G_VIS, tooltip = "Bars: active zones end the set number of bars past the last candle. Chart edge: active zones and their quadrants run to the right edge of the chart. Mitigated zones always stop where they broke.")
 i_zoneTxt  = input.bool(true, "Zone labels",                     group = G_VIS)
 i_maxDist  = input.float(8.0, "Hide zones farther than (% from price)", group = G_VIS, minval = 0.0, step = 0.5, tooltip = "Zones farther than this from the current price are not drawn, so a distant monthly zone cannot squash the chart scale. They are still tracked and still count for setups and the dashboard. 0 = always draw.")
+i_band     = input.float(20.0, "Clip zones to price band (× chart ATR)", group = G_VIS, minval = 0.0, step = 1.0, tooltip = "Keeps the chart scale on the candles: any part of a zone farther than this many chart-timeframe ATRs above or below the current price is not drawn (the box is cut at the band edge and labelled 'clipped'). Tall HTF wicks then cannot stretch Auto fit. The zone's real prices, score, dashboard and setups are unchanged. 0 = draw full zones.")
 i_cDem     = input.color(color.new(color.teal, 0), "Demand",     group = G_VIS, inline = "zc")
 i_cSup     = input.color(color.new(color.red,  0), "Supply",     group = G_VIS, inline = "zc")
 i_fillT    = input.int(85,   "Fill transparency (100 = no fill)", group = G_VIS, minval = 0, maxval = 100)
@@ -2033,7 +2034,8 @@ f_tags(Zone z) =>
 
 f_zoneText(Zone z) =>
     string side = z.dir == 1 ? " demand · " : " supply · "
-    z.mitig ? array.get(names, z.tfi) + side + "mitigated" : array.get(names, z.tfi) + side + f_tags(z) + (i_showQ ? " · Q" + str.tostring(math.round(z.q)) : "")
+    string clip = f_clipped(z) ? " (clipped)" : ""
+    z.mitig ? array.get(names, z.tfi) + side + "mitigated" + clip : array.get(names, z.tfi) + side + f_tags(z) + (i_showQ ? " · Q" + str.tostring(math.round(z.q)) : "") + clip
 
 // 0-100: tags (65) + wick size (15) + displacement (15) + freshness (10).
 f_quality(Zone z) =>
@@ -2044,6 +2046,19 @@ f_quality(Zone z) =>
     float dispPts = na(a) or a <= 0 ? 0.0 : 15.0 * math.min(math.max(mv, 0.0) / a / (2.0 * i_sdMult), 1.0)
     float frshPts = math.max(0.0, 10.0 - 4.0 * z.visits - (z.wickThru ? 5.0 : 0.0))
     math.min(100.0, tagPts + wickPts + dispPts + frshPts)
+
+// Price band for drawing (chart-TF ATR based) so tall zones cannot stretch
+// the chart's autoscale.
+rzChartAtr = ta.atr(14)
+
+f_visTop(Zone z) =>
+    i_band > 0 and not na(rzChartAtr) ? math.min(z.top, close + i_band * rzChartAtr) : z.top
+
+f_visBot(Zone z) =>
+    i_band > 0 and not na(rzChartAtr) ? math.max(z.bot, close - i_band * rzChartAtr) : z.bot
+
+f_clipped(Zone z) =>
+    f_visTop(z) < z.top or f_visBot(z) > z.bot
 
 f_far(Zone z) =>
     float d = close > z.top ? close - z.top : close < z.bot ? z.bot - close : 0.0
@@ -2078,8 +2093,10 @@ f_drawZone(Zone z) =>
     color c    = z.dir == 1 ? i_cDem : i_cSup
     int   rt   = z.mitig ? z.mitT : time + i_extBars * chartMs
     bool  edge = i_extMode == "Chart edge" and not z.mitig
+    float vt   = f_visTop(z)
+    float vb   = f_visBot(z)
     if z.mitig
-        z.bx := box.new(z.t0, z.top, rt, z.bot, xloc = xloc.bar_time,
+        z.bx := box.new(z.t0, vt, rt, vb, xloc = xloc.bar_time,
              bgcolor = color.new(c, math.max(i_fillT, 93)), border_color = color.new(c, 40), border_width = 1,
              border_style = line.style_dotted,
              text = i_zoneTxt ? f_zoneText(z) : "", text_size = size.tiny, text_color = color.new(c, 25),
@@ -2087,7 +2104,7 @@ f_drawZone(Zone z) =>
     else
         bool pend = f_pending(z)
         int  bw   = z.tfi == 0 ? 3 : z.tfi <= 2 ? 2 : 1
-        z.bx := box.new(z.t0, z.top, rt, z.bot, xloc = xloc.bar_time,
+        z.bx := box.new(z.t0, vt, rt, vb, xloc = xloc.bar_time,
              bgcolor = color.new(c, pend ? math.min(i_fillT + 8, 100) : i_fillT),
              border_color = c, border_width = bw,
              border_style = pend or z.wickThru ? line.style_dashed : line.style_solid,
@@ -2096,8 +2113,8 @@ f_drawZone(Zone z) =>
              text_halign = f_zoneHalign(z.tfi), text_valign = f_zoneValign(z.tfi))
         if i_quads
             for k = 0 to 4
-                if array.get(qOn, k)
-                    float y = f_qPrice(z, array.get(qPct, k))
+                float y = f_qPrice(z, array.get(qPct, k))
+                if array.get(qOn, k) and y <= vt and y >= vb
                     array.push(z.qLines, line.new(z.t0, y, rt, y, xloc = xloc.bar_time, extend = edge ? extend.right : extend.none, color = i_qZoneCol ? color.new(c, k == 2 ? 10 : 45) : array.get(qCol, k), style = f_lineStyle(array.get(qSty, k)), width = array.get(qWid, k)))
                     if array.get(qLbl, k)
                         array.push(z.qLbls, label.new(rt, y, str.tostring(array.get(qPct, k) * 100, "#") + "%  " + str.tostring(y, format.mintick), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(c, 100), textcolor = i_qZoneCol ? c : f_textCol(), size = size.tiny))
@@ -2271,7 +2288,10 @@ if array.size(zones) > 0
         // state, so boxes are not created, restyled and deleted on every
         // historical bar. A mitigated zone keeps the score it had when it broke.
         else if barstate.islast
-            bool want = not f_far(z) and z.q >= i_qShow
+            bool want = not f_far(z) and z.q >= i_qShow and f_visTop(z) > f_visBot(z)
+            // A clipped zone follows the band as price moves: redraw it.
+            if want and not na(z.bx) and f_clipped(z)
+                f_undraw(z)
             if want and na(z.bx)
                 f_drawZone(z)
             else if not want and not na(z.bx)
