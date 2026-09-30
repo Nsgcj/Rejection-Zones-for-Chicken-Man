@@ -1546,7 +1546,7 @@ alertcondition(enableAtrSltp and sltpTp3Crossed, title="Price crossed TP3", mess
 // INPUTS
 // ============================================================================
 // Shown in the dashboard's top-left cell so the running version is obvious.
-const string RZ_VERSION = "v11"
+const string RZ_VERSION = "v12"
 const string G_TF  = "RZ ▸ Timeframes"
 const string G_DET = "RZ ▸ Zone detection"
 const string G_QLT = "RZ ▸ Zone quality"
@@ -1583,6 +1583,12 @@ i_useFvg = input.bool(true, "FVG strengthens S&D",                group = G_DET,
 
 i_qShow  = input.int(30, "Min quality to draw",                   group = G_QLT, minval = 0, maxval = 100, tooltip = "Zones scoring below this are tracked but not drawn and not counted in the dashboard.")
 i_qSetup = input.int(60, "Min quality for setups & alerts",       group = G_QLT, minval = 0, maxval = 100, tooltip = "Setup labels and all zone alerts need a zone at or above this score.")
+i_qPreset = input.string("All", "Show only zones scoring", options = ["All", "50%+", "75%+", "85%+"], group = G_QLT, tooltip = "Quick quality filter. 50%+ / 75%+ / 85%+ shows only zones with a quality score of at least 50 / 75 / 85, and setups and zone alerts then also need that score. 'All' uses the two thresholds above. The stricter of the preset and each threshold always wins.")
+
+// Effective thresholds: the preset can only raise them.
+int qPresetVal = i_qPreset == "50%+" ? 50 : i_qPreset == "75%+" ? 75 : i_qPreset == "85%+" ? 85 : 0
+int qDraw      = math.max(i_qShow, qPresetVal)
+int qSetup     = math.max(i_qSetup, qPresetVal)
 i_showQ  = input.bool(true, "Show score on zone labels",          group = G_QLT, tooltip = "Score (0-100):\n• Tags: LIQ 20 (or SFP 15), S&R 20, S&D 15, FVG 10\n• Wick size: up to 15 (full at 2× the wick-to-body ratio)\n• Displacement: up to 15 (full at 2× the S&D displacement)\n• Freshness: 10 untouched, -4 per visit, -5 while price is wicking through the tip")
 
 i_ctfZones = input.bool(true, "Zones on chart timeframe", group = G_VIS, tooltip = "Also draws rejection zones on whatever timeframe the chart is on (e.g. 15m, 2H, 12H), with the same rules. Skipped automatically when the chart timeframe is already one of the seven configured timeframes. Chart-timeframe zones show in the dashboard but are not used for setups.")
@@ -2144,8 +2150,8 @@ f_prune(int i, int zd) =>
                     take := true
                 else if pend != vicPend
                     take := pend
-                else if (z.q < i_qShow) != (vicQ < i_qShow)
-                    take := z.q < i_qShow
+                else if (z.q < qDraw) != (vicQ < qDraw)
+                    take := z.q < qDraw
                 else
                     take := d > vicD
                 if take
@@ -2211,7 +2217,7 @@ f_addZone(int i, int zd, float top, float bot, int tags, float ratio, float relV
             if array.size(recentZ) > 3
                 array.shift(recentZ)
         f_prune(i, zd)
-        if not f_pending(z) and z.q >= i_qSetup
+        if not f_pending(z) and z.q >= qSetup
             array.set(fl, 0, true)
             if z.sfp
                 array.set(fl, 6, true)
@@ -2263,7 +2269,7 @@ if array.size(zones) > 0
                         z.s5 := false
                         z.s6 := false
                         z.tap50 := false
-                        if not f_pending(z) and z.q >= i_qSetup
+                        if not f_pending(z) and z.q >= qSetup
                             array.set(fl, 1, true)
                             f_alertDyn(str.format("Price entered {0}{1} zone ({2}, Q{3}) on {4} at {5}", array.get(names, z.tfi), z.dir == 1 ? " demand" : " supply", f_tags(z), str.tostring(math.round(z.q)), syminfo.ticker, str.tostring(close, format.mintick)))
                     if touch
@@ -2273,7 +2279,7 @@ if array.size(zones) > 0
                     // 50% tap: a confirmed close crossing the Mean Threshold,
                     // once per visit, on zones good enough for setups.
                     float mt = f_qPrice(z, 0.5)
-                    if barstate.isconfirmed and z.armed and not z.tap50 and not f_pending(z) and z.q >= i_qSetup and ((close[1] < mt and close >= mt) or (close[1] > mt and close <= mt))
+                    if barstate.isconfirmed and z.armed and not z.tap50 and not f_pending(z) and z.q >= qSetup and ((close[1] < mt and close >= mt) or (close[1] > mt and close <= mt))
                         z.tap50 := true
                         array.set(fl, 5, true)
                         if i_alTap
@@ -2288,7 +2294,7 @@ if array.size(zones) > 0
         // state, so boxes are not created, restyled and deleted on every
         // historical bar. A mitigated zone keeps the score it had when it broke.
         else if barstate.islast
-            bool want = not f_far(z) and z.q >= i_qShow and f_visTop(z) > f_visBot(z)
+            bool want = not f_far(z) and z.q >= qDraw and f_visTop(z) > f_visBot(z)
             // A clipped zone follows the band as price moves: redraw it.
             if want and not na(z.bx) and f_clipped(z)
                 f_undraw(z)
@@ -2356,7 +2362,7 @@ f_event(int i, int zd, bool choch, float lvl, int pivT, int evTime, bool early) 
     if i >= 4 and (choch or i_setupBos) and ceOk
         Zone best = na
         for z in zones
-            if not z.mitig and z.dir == zd and z.tfi < i and not f_pending(z) and z.q >= i_qSetup and z.tapped and bar_index - z.tapBar <= i_setupWin and not f_fired(z, i)
+            if not z.mitig and z.dir == zd and z.tfi < i and not f_pending(z) and z.q >= qSetup and z.tapped and bar_index - z.tapBar <= i_setupWin and not f_fired(z, i)
                 if na(best)
                     best := z
                 else if z.tfi < best.tfi or (z.tfi == best.tfi and z.q > best.q)
@@ -2491,11 +2497,11 @@ f_zoneStatus(int i) =>
     int    nHid  = 0
     int    nFar  = 0
     for z in zones
-        if z.tfi == i and not z.mitig and (f_pending(z) or z.q < i_qShow)
+        if z.tfi == i and not z.mitig and (f_pending(z) or z.q < qDraw)
             nHid += 1
         else if z.tfi == i and not z.mitig and f_far(z)
             nFar += 1
-        if z.tfi == i and not z.mitig and not f_pending(z) and z.q >= i_qShow
+        if z.tfi == i and not z.mitig and not f_pending(z) and z.q >= qDraw
             if close <= z.top and close >= z.bot
                 inTxt := "IN " + (z.dir == 1 ? "DEMAND " : "SUPPLY ") + f_tags(z) + " Q" + str.tostring(math.round(z.q))
                 inCol := z.dir == 1 ? i_cDem : i_cSup
@@ -2510,7 +2516,7 @@ f_zoneStatus(int i) =>
                     dDn := d
                     qDn := z.q
     string txt = inTxt != "" ? inTxt : "supply " + (na(dUp) ? "none" : "↑" + str.tostring(dUp, "#.#") + " Q" + str.tostring(math.round(qUp))) + " · demand " + (na(dDn) ? "none" : "↓" + str.tostring(dDn, "#.#") + " Q" + str.tostring(math.round(qDn)))
-    string why = (nHid > 0 ? str.tostring(nHid) + " below Q" + str.tostring(i_qShow) : "") + (nHid > 0 and nFar > 0 ? ", " : "") + (nFar > 0 ? str.tostring(nFar) + " beyond " + str.tostring(i_maxDist, "#.#") + "%" : "")
+    string why = (nHid > 0 ? str.tostring(nHid) + " below Q" + str.tostring(qDraw) : "") + (nHid > 0 and nFar > 0 ? ", " : "") + (nFar > 0 ? str.tostring(nFar) + " beyond " + str.tostring(i_maxDist, "#.#") + "%" : "")
     txt := txt + (why != "" ? "  (hidden: " + why + ")" : "")
     [txt, inTxt != "" ? inCol : color.new(f_textCol(), 25)]
 
